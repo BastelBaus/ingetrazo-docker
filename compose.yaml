@@ -1,0 +1,61 @@
+# IngeTrazo in containers.
+#
+#   docker compose up -d                       # MCP server only
+#   docker compose --profile viewer up -d      # + the live web viewer
+#
+# Settings come from .env (copy .env.example). Models live in ./data
+# (or INGETRAZO_DATA_DIR); both services see the same folder.
+
+x-image: &image
+  image: ${INGETRAZO_IMAGE:-ghcr.io/bastelbaus/ingetrazo:latest}
+  build:
+    context: .
+    args:
+      INGETRAZO_REPO: ${INGETRAZO_REPO:-https://github.com/BastelBaus/ingetrazo}
+      INGETRAZO_REF: ${INGETRAZO_REF:-67cb8518682af44c5523c79919e6556b3a328006}
+  restart: unless-stopped
+  init: false            # tini is the image's entrypoint already
+  shm_size: 256m
+
+services:
+  mcp:
+    <<: *image
+    command: ["mcp"]
+    ports:
+      - "${MCP_BIND:-127.0.0.1}:${MCP_PORT:-8765}:8765"
+    environment:
+      MCP_AUTH: ${MCP_AUTH:-token}
+      MCP_TOKEN: ${MCP_TOKEN:-}
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
+      OAUTH_USER: ${OAUTH_USER:-admin}
+      OAUTH_PASSWORD: ${OAUTH_PASSWORD:-}
+      OAUTH_REDIRECT_URIS: ${OAUTH_REDIRECT_URIS:-}
+      INGETRAZO_MODEL: ${INGETRAZO_MODEL:-}
+      INGETRAZO_ALLOW_SAVE: ${INGETRAZO_ALLOW_SAVE:-true}
+      INGETRAZO_SAVE_FORMAT: ${INGETRAZO_SAVE_FORMAT:-}
+    volumes:
+      - ${INGETRAZO_DATA_DIR:-./data}:/data
+      - mcp-state:/state
+
+  viewer:
+    <<: *image
+    profiles: ["viewer"]
+    command: ["viewer"]
+    ports:
+      - "${VIEWER_BIND:-127.0.0.1}:${VIEWER_PORT:-8080}:8080"
+    environment:
+      HEALTH_PORT: "8080"
+      VIEWER_USER: ${VIEWER_USER:-viewer}
+      VIEWER_PASSWORD: ${VIEWER_PASSWORD:-}
+      VIEWER_TITLE: ${VIEWER_TITLE:-IngeTrazo viewer}
+      VIEWER_SHEET_DPI: ${VIEWER_SHEET_DPI:-120}
+    volumes:
+      - ${INGETRAZO_DATA_DIR:-./data}:/data:ro
+      - viewer-cache:/cache
+      - viewer-state:/state
+
+volumes:
+  mcp-state:
+  viewer-cache:
+  viewer-state:
