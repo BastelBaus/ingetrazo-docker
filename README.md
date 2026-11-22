@@ -29,8 +29,11 @@ cp .env.example .env
 # set MCP_TOKEN in .env, e.g. to the output of: openssl rand -hex 32
 mkdir -p data && cp /path/to/*.igz data/
 
-docker compose --profile viewer up -d --build
+docker compose --profile viewer up -d
 ```
+
+This pulls the prebuilt image `ghcr.io/bastelbaus/ingetrazo:latest` (amd64 and arm64).
+Add `--build` to build it locally instead, e.g. against another `INGETRAZO_REF`.
 
 - MCP: `http://localhost:8765/mcp` (bearer token)
 - Viewer: `http://localhost:8080`
@@ -62,6 +65,7 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `MCP_TOKEN` | – | Bearer token, at least 16 characters (`token` mode) |
 | `VIEWER_PASSWORD` | – | Viewer password (user `VIEWER_USER`): login page for browsers, Basic auth for scripts |
 | `VIEWER_SHEET_DPI` | `120` | Sheet image resolution |
+| `INGETRAZO_IMAGE` | `ghcr.io/bastelbaus/ingetrazo:latest` | Image to pull (or tag to build) |
 | `INGETRAZO_REPO` / `INGETRAZO_REF` | fork / pinned commit | Which IngeTrazo to build |
 
 ## How it works
