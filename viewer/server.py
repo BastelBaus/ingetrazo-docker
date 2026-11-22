@@ -4,23 +4,26 @@ data folder, in the browser, refreshed when a model file changes.
 
 Routes: ``/`` overview, ``/m/<slug>`` one model, ``/files/<slug>/<rev>/<f>``
 rendered images and PDF, ``/events`` server-sent events (a render finished),
-``/healthz``. Optional basic auth: ``VIEWER_PASSWORD`` (user ``VIEWER_USER``,
-default ``viewer``).
+``/healthz``. Optional password: ``VIEWER_PASSWORD`` (user ``VIEWER_USER``,
+default ``viewer``) — a login page with a session cookie for browsers
+(``/login``, ``/logout``), Basic auth for scripts.
 """
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
 import json
 import os
 import re
+import secrets
 import sys
 import threading
 import time
 from html import escape
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from mcp_http.appbridge import App, log
 
@@ -103,12 +106,15 @@ JS = """
 """
 
 
+LOGOUT = '<a class="btn" href="/logout">Log out</a>'
+
+
 def _page(title: str, header: str, body: str, slug: str | None = None) -> bytes:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{escape(title)}</title><style>{CSS}</style></head>
 <body data-slug="{escape(slug or '')}"><header>{header}<span class="spacer"></span>
-<span id="live" class="live"><i></i><span>connecting…</span></span></header>
+<span id="live" class="live"><i></i><span>connecting…</span></span>{LOGOUT if PASSWORD else ""}</header>
 <main>{body}</main><script>{JS}</script></body></html>""".encode("utf-8")
 
 
@@ -206,6 +212,59 @@ def model_page(slug: str) -> bytes | None:
     return _page(f'{idx["name"]} – {TITLE}', header, body, slug)
 
 
+COOKIE = "itz_viewer"
+SESSION_DAYS = int(os.environ.get("VIEWER_SESSION_DAYS", 30))
+#: Signs the session cookies; new on every start, so a restart logs out.
+_SECRET = secrets.token_bytes(32)
+
+
+def _credentials_ok(user: str, pw: str) -> bool:
+    return (hmac.compare_digest(user.encode(), USER.encode())
+            & hmac.compare_digest(pw.encode(), PASSWORD.encode()))
+
+
+def _sign(expiry: str) -> str:
+    return hmac.new(_SECRET, f"{USER}|{expiry}".encode(), hashlib.sha256).hexdigest()
+
+
+def _new_session() -> str:
+    expiry = str(int(time.time()) + SESSION_DAYS * 86400)
+    return f"{expiry}.{_sign(expiry)}"
+
+
+def _session_valid(value: str) -> bool:
+    expiry, _, sig = value.partition(".")
+    if not expiry.isdigit() or int(expiry) < time.time():
+        return False
+    return hmac.compare_digest(sig, _sign(expiry))
+
+
+def _safe_next(value: str) -> str:
+    """Only a path on this server (no //host, no scheme)."""
+    return value if value.startswith("/") and not value.startswith("//") else "/"
+
+
+def login_page(error: str, nxt: str) -> bytes:
+    err = f'<p class="err">{escape(error)}</p>' if error else ""
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Log in – {escape(TITLE)}</title><style>{CSS}
+.login{{max-width:340px;margin:12vh auto;background:var(--card);border:1px solid var(--line);
+border-radius:12px;padding:24px;box-shadow:var(--shadow)}}
+.login h1{{font-size:18px;margin:0 0 16px}}.login label{{display:block;font-size:13px;color:var(--muted);margin:12px 0 4px}}
+.login input{{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;
+background:var(--bg);color:var(--fg);font:inherit}}
+.login button{{margin-top:18px;width:100%;padding:9px;border:0;border-radius:6px;background:var(--accent);
+color:#fff;font:inherit;font-weight:600;cursor:pointer}}
+.err{{color:#c0392b;font-size:14px;margin:0 0 8px}}</style></head>
+<body><main><form class="login" method="post" action="/login">
+<h1>{escape(TITLE)}</h1>{err}
+<input type="hidden" name="next" value="{escape(nxt)}">
+<label for="u">User</label><input id="u" name="user" autocomplete="username" value="{escape(USER)}">
+<label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" autofocus>
+<button type="submit">Log in</button></form></main></body></html>""".encode("utf-8")
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "ingetrazo-viewer"
@@ -224,30 +283,82 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
-    def _authorised(self) -> bool:
-        if not PASSWORD:
-            return True
+    # ---- authentication ------------------------------------------------------
+    # Browsers get a login page and a session cookie: embedded browsers
+    # (VS Code's, many WebViews) never show the Basic-auth dialog and only
+    # print the 401. Scripts and curl keep using Basic auth.
+    def _cookie_ok(self) -> bool:
+        jar = SimpleCookie()
+        try:
+            jar.load(self.headers.get("Cookie", ""))
+        except CookieError:
+            return False
+        morsel = jar.get(COOKIE)
+        return morsel is not None and _session_valid(morsel.value)
+
+    def _basic_ok(self) -> bool:
         value = self.headers.get("Authorization", "")
-        if value.startswith("Basic "):
-            try:
-                user, _, pw = base64.b64decode(value[6:]).decode().partition(":")
-            except ValueError:
-                user, pw = "", ""
-            if hmac.compare_digest(user.encode(), USER.encode()) and \
-                    hmac.compare_digest(pw.encode(), PASSWORD.encode()):
-                return True
-        self._send(401, b"authentication required\n", "text/plain",
-                   {"WWW-Authenticate": f'Basic realm="{TITLE}", charset="UTF-8"'})
+        if not value.startswith("Basic "):
+            return False
+        try:
+            user, _, pw = base64.b64decode(value[6:]).decode().partition(":")
+        except ValueError:
+            return False
+        return _credentials_ok(user, pw)
+
+    def _authorised(self, path: str) -> bool:
+        if not PASSWORD or self._cookie_ok() or self._basic_ok():
+            return True
+        wants_html = "text/html" in self.headers.get("Accept", "")
+        if wants_html and not path.startswith(("/files/", "/events")):
+            target = self.path if self.path.startswith("/") else "/"
+            self._send(303, b"", "text/plain",
+                       {"Location": "/login?next=" + quote(target, safe="")})
+        else:
+            self._send(401, b"authentication required\n", "text/plain",
+                       {"WWW-Authenticate": f'Basic realm="{TITLE}", charset="UTF-8"'})
         return False
+
+    def _secure(self) -> bool:
+        return (self.headers.get("X-Forwarded-Proto", "").lower() == "https"
+                or os.environ.get("VIEWER_COOKIE_SECURE", "").lower() in ("1", "true", "yes"))
+
+    def _login_page(self, status: int = 200, error: str = "", nxt: str = "/"):
+        self._send(status, login_page(error, nxt), "text/html; charset=utf-8",
+                   {"Cache-Control": "no-store"})
+
+    def do_POST(self):
+        path = urlsplit(self.path).path
+        if path != "/login":
+            return self._send(404, b"not found\n", "text/plain")
+        length = min(int(self.headers.get("Content-Length") or 0), 4096)
+        form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+        user = (form.get("user") or [""])[0]
+        pw = (form.get("password") or [""])[0]
+        nxt = _safe_next((form.get("next") or ["/"])[0])
+        if not PASSWORD or _credentials_ok(user, pw):
+            cookie = (f"{COOKIE}={_new_session()}; Path=/; HttpOnly; SameSite=Lax; "
+                      f"Max-Age={SESSION_DAYS * 86400}" + ("; Secure" if self._secure() else ""))
+            return self._send(303, b"", "text/plain", {"Location": nxt, "Set-Cookie": cookie})
+        time.sleep(0.7)                          # slows down guessing
+        return self._login_page(401, "Wrong user name or password.", nxt)
 
     def do_HEAD(self):
         self.do_GET()
 
     def do_GET(self):
-        path = urlsplit(self.path).path
+        parts = urlsplit(self.path)
+        path = parts.path
         if path == "/healthz":
             return self._health()
-        if not self._authorised():
+        if path == "/login":
+            nxt = _safe_next((parse_qs(parts.query).get("next") or ["/"])[0])
+            return self._login_page(nxt=nxt)
+        if path == "/logout":
+            return self._send(303, b"", "text/plain", {
+                "Location": "/login",
+                "Set-Cookie": f"{COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"})
+        if not self._authorised(path):
             return None
         html = "text/html; charset=utf-8"
         nocache = {"Cache-Control": "no-store"}

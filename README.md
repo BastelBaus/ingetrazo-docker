@@ -60,11 +60,17 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `INGETRAZO_SAVE_FORMAT` | – | `json` = plain-JSON `.igz`, diffable in git |
 | `MCP_AUTH` | `token` | `none`, `token` or `oauth` |
 | `MCP_TOKEN` | – | Bearer token, at least 16 characters (`token` mode) |
-| `VIEWER_PASSWORD` | – | Basic-auth password for the viewer (user `VIEWER_USER`) |
+| `VIEWER_PASSWORD` | – | Viewer password (user `VIEWER_USER`): login page for browsers, Basic auth for scripts |
 | `VIEWER_SHEET_DPI` | `120` | Sheet image resolution |
 | `INGETRAZO_REPO` / `INGETRAZO_REF` | fork / pinned commit | Which IngeTrazo to build |
 
 ## How it works
+
+![Architecture](docs/architecture.drawio.png)
+
+<sub>The diagram is editable: open `docs/architecture.drawio.png` in [draw.io / diagrams.net](https://app.diagrams.net)
+(the diagram is embedded in the PNG) and save it back as PNG. `docs/architecture.drawio` is the same diagram as
+XML; `python docs/render_drawio_png.py` re-renders the PNG from it.</sub>
 
 Each container runs one IngeTrazo **without a window** (`--headless --ai-bridge`). It renders with OpenGL in
 software (Mesa llvmpipe) inside an in-memory X server (Xvfb).
