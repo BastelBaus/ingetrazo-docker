@@ -1,0 +1,46 @@
+# Build the image and run the end-to-end smoke test (MCP + viewer).
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:          # release.yml runs it on main and tags, before publishing
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  smoke:
+    name: smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Lint shell scripts
+        run: shellcheck entrypoint.sh tests/smoke.sh
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ingetrazo-docker:ci
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,scope=amd64,mode=max
+
+      - name: Smoke test
+        env:
+          IMAGE: ingetrazo-docker:ci
+        run: tests/smoke.sh
+
+      - name: Validate compose file
+        env:
+          MCP_TOKEN: ci-dummy-token-0123456789
+        run: docker compose --profile viewer config -q
