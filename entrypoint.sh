@@ -20,7 +20,8 @@ esac
 # Qt keeps its settings and caches in HOME; keep them in the state volume.
 export XDG_CONFIG_HOME="${INGETRAZO_STATE:-/state}/config"
 export XDG_CACHE_HOME="${INGETRAZO_STATE:-/state}/cache-$service"
-export XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)"
+uid="$(id -u)"
+export XDG_RUNTIME_DIR="/tmp/runtime-$uid"
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 
