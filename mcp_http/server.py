@@ -186,6 +186,13 @@ class Handler(BaseHTTPRequestHandler):
                               "text/plain; charset=utf-8")
         return self._json(404, {"error": "not found"})
 
+    def do_OPTIONS(self):
+        """CORS preflight of the OAuth endpoints (a browser-based client
+        such as the MCP Inspector registers and fetches tokens itself)."""
+        if auth.oauth is not None and auth.oauth.route(self, "OPTIONS"):
+            return None
+        return self._json(404, {"error": "not found"})
+
     def do_DELETE(self):
         if urlsplit(self.path).path == "/mcp":
             return self._send(405, headers={"Allow": "POST"})
