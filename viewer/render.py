@@ -137,15 +137,17 @@ class Renderer:
                  "rendered_ts": time.time(),
                  "sheets": [], "views": [], "pdf": None, "errors": []}
         try:
-            info = self._call("open_document", {"path": str(model)})
+            # The viewer never saves: whatever a render left changed goes.
+            info = self._call("open_document", {"path": str(model),
+                                                "discard_changes": True})
             sheets = self._sheet_list(info)
             if sheets:
                 index["sheets"], index["errors"] = self._render_sheets(out, sheets)
                 if WITH_PDF:
                     try:
-                        self._call("export_sheets", {
+                        self._call("export_pdf", {
                             "path": str(out / "sheets.pdf"), "format": "pdf",
-                            "sheets": list(range(len(sheets)))})
+                            "sheets": list(range(1, len(sheets) + 1))})
                         index["pdf"] = "sheets.pdf"
                     except RuntimeError as exc:
                         index["errors"].append(f"PDF: {exc}")
@@ -193,11 +195,12 @@ class Renderer:
 
     def _render_sheets(self, out: Path, sheets: list[dict]) -> tuple[list, list]:
         errors: list[str] = []
-        result = self._call("export_sheets", {
+        # Places are 1-based; per sheet, the views that did not render.
+        result = self._call("export_pdf", {
             "path": str(out / "sheet.png"), "format": "png",
-            "dpi": SHEET_DPI, "sheets": list(range(len(sheets)))})
+            "dpi": SHEET_DPI, "sheets": list(range(1, len(sheets) + 1))})
         files = [Path(f) for f in result.get("files") or []]
-        for sheet, msgs in (result.get("errors") or {}).items():
+        for sheet, msgs in (result.get("views_not_rendered") or {}).items():
             for m in msgs if isinstance(msgs, list) else [msgs]:
                 errors.append(f"sheet {sheet}: {m}")
         rows = []

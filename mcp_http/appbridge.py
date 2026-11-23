@@ -6,8 +6,8 @@ app ships ``scripts/ingetrazo_mcp.py`` with the tool definitions, the
 instructions, the JSON-RPC ``handle()`` and the code that starts a
 window-less IngeTrazo (``--headless``) and waits for its bridge. This module
 loads that file from the app checkout, starts the child once, and serialises
-every request to it — the bridge serves one client at a time, and the HTTP
-server and the health probe both share this one connection.
+every request to it — the bridge works one request at a time, and the HTTP
+server, the viewer and the health probe all go through this one lock.
 """
 from __future__ import annotations
 
@@ -34,11 +34,16 @@ def _load_stdio_server():
     module = importlib.util.module_from_spec(spec)
     sys.modules["ingetrazo_mcp"] = module
     spec.loader.exec_module(module)
-    for name in ("handle", "_bridge", "_start_child", "TOOLS", "INSTRUCTIONS"):
+    for name in ("handle", "_bridge", "_start_child", "TOOLS", "INSTRUCTIONS",
+                 "HOST", "OPERATION_TIMEOUT", "DISCOVERY_TIMEOUT"):
         if not hasattr(module, name):
             raise RuntimeError(
                 f"{script} has no {name}: this IngeTrazo is too old for the "
-                "container (needs ingelibre/ingetrazo#1523)")
+                "container (needs IngeTrazo 0.6.3 or later)")
+    # Its half-second discovery suits a desktop with several windows. Here
+    # there is one IngeTrazo on a known port, which may still be finishing
+    # an open_document when the next call looks its document up.
+    module.DISCOVERY_TIMEOUT = max(module.DISCOVERY_TIMEOUT, 10.0)
     return module
 
 
@@ -105,15 +110,28 @@ class App:
                 self.busy_since = None
 
     def _raw(self, tool: str, args: dict, timeout: float | None) -> dict:
-        sock = getattr(self.mcp, "_sock", None)
-        if timeout is not None and sock is not None:
-            sock.settimeout(timeout)
+        """One bridge request on a fresh socket, addressed as IngeTrazo
+        wants it: every tool but ``list_documents`` names the live document
+        (``instance_id`` + ``document_id``), looked up just before."""
+        mcp = self.mcp
+        saved = mcp.OPERATION_TIMEOUT, mcp.DISCOVERY_TIMEOUT
+        if timeout is not None:
+            mcp.OPERATION_TIMEOUT = mcp.DISCOVERY_TIMEOUT = timeout
+        endpoint = {"host": mcp.HOST, "port": mcp.PORT}
         try:
-            return self.mcp._bridge(tool, args)
+            if tool == "list_documents":
+                return mcp._bridge(endpoint, tool, args)
+            listed = mcp._bridge(endpoint, "list_documents", {})
+            if not listed.get("ok"):
+                return listed
+            documents = (listed.get("result") or {}).get("documents") or []
+            if not documents:
+                return {"ok": False, "error": "IngeTrazo has no document open"}
+            doc = documents[0]
+            endpoint["instance_id"] = doc["instance_id"]
+            return mcp._bridge(endpoint, tool, args, doc["document_id"])
         finally:
-            sock = getattr(self.mcp, "_sock", None)
-            if timeout is not None and sock is not None:
-                sock.settimeout(180.0)
+            mcp.OPERATION_TIMEOUT, mcp.DISCOVERY_TIMEOUT = saved
 
     def probe(self, max_busy: float) -> tuple[int, dict]:
         """``/healthz``: (HTTP status, body). Goes through the shared
@@ -129,7 +147,7 @@ class App:
                 return 200, {"status": "busy", "busy_seconds": round(busy_for)}
             return 503, {"status": "blocked", "busy_seconds": round(busy_for)}
         try:
-            reply = self._raw("document_info", {}, 10.0)
+            reply = self._raw("list_documents", {}, 10.0)
         except OSError as exc:
             return 503, {"status": "bridge not answering", "error": str(exc)}
         finally:

@@ -31,16 +31,18 @@ KNOWN_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 HIDDEN_TOOLS = {"shutdown"}
 #: Tools whose ``path`` argument names a file: confined to the data folder.
 PATH_TOOLS = {"open_document": True, "save_document": False,
-              "export_pdf": False, "export_view": False,
-              "export_sheets": False}
+              "export_pdf": False, "export_view": False}
 
 LIST_DOCUMENTS = {
     "name": "list_documents",
     "description": (
-        "List the IngeTrazo documents (.igz) in the container's data folder, "
-        "with size, modification time and which one is open. Paths for "
+        "List the document open in IngeTrazo (open_documents: its "
+        "document_id, which every other tool needs) and the documents (.igz) "
+        "in the container's data folder, with size, modification time and "
+        "which one is open. After open_document the document_id changes: "
+        "use the one it returns, or call this again. Paths for "
         "open_document, save_document and the export tools are relative to "
-        "this folder (absolute paths must lie inside it)."),
+        "the data folder (absolute paths must lie inside it)."),
     "inputSchema": {"type": "object", "properties": {}},
 }
 
@@ -56,8 +58,12 @@ def _text(result: object, is_error: bool = False) -> dict:
 
 
 def _list_documents() -> dict:
-    reply = app.call("document_info")
-    open_path = (reply.get("result") or {}).get("path") if reply.get("ok") else None
+    """IngeTrazo's own listing (the live document and its ids) and the
+    data folder's models."""
+    reply = app.call("list_documents")
+    live = ((reply.get("result") or {}).get("documents") or []
+            if reply.get("ok") else [])
+    open_path = live[0].get("path") if live else None
     docs = []
     for p in list_models():
         st = p.stat()
@@ -68,7 +74,8 @@ def _list_documents() -> dict:
                 st.st_mtime, timezone.utc).isoformat(timespec="seconds"),
             "open": open_path is not None and str(p) == str(open_path),
         })
-    return _text({"data_folder": str(DATA_DIR), "documents": docs})
+    return _text({"open_documents": live, "data_folder": str(DATA_DIR),
+                  "documents": docs})
 
 
 def _handle(msg: dict) -> dict | None:
@@ -102,8 +109,10 @@ def _handle(msg: dict) -> dict | None:
             result["protocolVersion"] = wanted
         result["serverInfo"] = {"name": "ingetrazo-docker", "version": "0.1.0"}
     elif method == "tools/list":
+        # The app's list_documents gives way to the container's, which
+        # includes it.
         tools = [t for t in reply["result"]["tools"]
-                 if t.get("name") not in HIDDEN_TOOLS]
+                 if t.get("name") not in HIDDEN_TOOLS | {"list_documents"}]
         reply["result"]["tools"] = tools + [LIST_DOCUMENTS]
     return reply
 

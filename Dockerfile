@@ -7,11 +7,12 @@
 
 FROM python:3.12-slim-bookworm
 
-# Which IngeTrazo to build. Headless mode needs ingelibre/ingetrazo#1523;
-# until that is merged upstream the default is the PR branch on the fork,
-# pinned by commit so a build is reproducible.
+# Which IngeTrazo to build. Headless mode is in IngeTrazo 0.6.3; the sheet
+# and scene tools come with ingelibre/ingetrazo#1543, #1544 and #1545.
+# Until those are merged upstream the default is their branch on the fork
+# (feature/sheet-sets), pinned by commit so a build is reproducible.
 ARG INGETRAZO_REPO=https://github.com/BastelBaus/ingetrazo
-ARG INGETRAZO_REF=67cb8518682af44c5523c79919e6556b3a328006
+ARG INGETRAZO_REF=187e43f9bc85a28b513f1d0b3f9c68a55dbf47a4
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -45,7 +46,7 @@ RUN git init -q . \
  && git log -1 --format='IngeTrazo %H (%cd)' > /opt/ingetrazo/BUILD_REF \
  && rm -rf .git \
  && grep -q -- '--headless' main.py \
- || { echo "ERROR: $INGETRAZO_REPO@$INGETRAZO_REF has no --headless mode (needs ingelibre/ingetrazo#1523)" >&2; exit 1; }
+ || { echo "ERROR: $INGETRAZO_REPO@$INGETRAZO_REF has no --headless mode (needs IngeTrazo 0.6.3 or later)" >&2; exit 1; }
 
 RUN grep -viE '^\s*(pytest|truststore)' requirements.txt > /tmp/req.txt \
  && pip install -r /tmp/req.txt \
