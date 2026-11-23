@@ -41,8 +41,19 @@ def rpc(method, params=None):
     return headers, reply["result"]
 
 
-def tool(name, args=None, expect_error=False):
-    _, result = rpc("tools/call", {"name": name, "arguments": args or {}})
+def document_id():
+    """The live document's id, which every tool but list_documents needs."""
+    _, result = rpc("tools/call", {"name": "list_documents", "arguments": {}})
+    live = json.loads(text(result))["open_documents"]
+    assert len(live) == 1, live
+    return live[0]["document_id"]
+
+
+def tool(name, args=None, expect_error=False, with_id=True):
+    args = dict(args or {})
+    if with_id and name != "list_documents":
+        args.setdefault("document_id", document_id())
+    _, result = rpc("tools/call", {"name": name, "arguments": args})
     assert bool(result.get("isError")) == expect_error, (name, result)
     return result
 
@@ -109,15 +120,28 @@ def main():
     check("tools/list", tools)
 
     def documents():
-        docs = json.loads(text(tool("list_documents")))["documents"]
-        assert any(d["path"] == "arco.igz" and d["open"] for d in docs), docs
+        listed = json.loads(text(tool("list_documents")))
+        assert any(d["path"] == "arco.igz" and d["open"] for d in listed["documents"]), listed
+        assert listed["open_documents"][0]["path"] == "/data/arco.igz", listed
     check("list_documents", documents)
+
+    def needs_id():
+        r = tool("query_model", expect_error=True, with_id=False)
+        assert "document_id" in text(r), text(r)
+    check("a tool without document_id is refused", needs_id)
 
     def info():
         d = json.loads(text(tool("document_info")))
         assert d["path"] == "/data/arco.igz" and d["sheets"], d
     check("document_info", info)
-    check("render_sheet (image)", lambda: image(tool("render_sheet", {"sheet": 0, "dpi": 40})))
+    def sheets():
+        listed = json.loads(text(tool("list_sheets")))["sheets"]
+        assert listed and listed[0]["index"] == 1, listed
+        one = json.loads(text(tool("get_sheet", {"sheet": 1})))
+        assert one["name"] == listed[0]["name"], one
+        json.loads(text(tool("list_scenes")))
+    check("list_sheets, get_sheet 1, list_scenes", sheets)
+    check("render_sheet (image)", lambda: image(tool("render_sheet", {"sheet": 1, "dpi": 40})))
     check("screenshot (image)", lambda: image(tool("screenshot", {"width": 320, "height": 200})))
 
     def build_and_save():

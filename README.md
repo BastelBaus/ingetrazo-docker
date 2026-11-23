@@ -16,9 +16,11 @@ IngeTrazo itself is not modified: the image builds it from a git ref on GitHub.
 |---|---|
 | ![Overview](docs/viewer-overview.png) | ![Model page](docs/viewer-model.png) |
 
-> **Status:** early. Headless mode comes with
-> [ingelibre/ingetrazo#1523](https://github.com/ingelibre/ingetrazo/pull/1523). Until that is merged, the image
-> builds from the PR branch, pinned to a commit.
+> **Status:** early. Headless mode is in IngeTrazo 0.6.3. The sheet and scene tools come with
+> [#1543](https://github.com/ingelibre/ingetrazo/pull/1543),
+> [#1544](https://github.com/ingelibre/ingetrazo/pull/1544) and
+> [#1545](https://github.com/ingelibre/ingetrazo/pull/1545). Until those are merged, the image
+> builds from their branch on the fork, pinned to a commit.
 
 ## Quick start
 
