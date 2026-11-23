@@ -4,34 +4,32 @@ data folder, in the browser, refreshed when a model file changes.
 
 Routes: ``/`` overview, ``/m/<slug>`` one model, ``/files/<slug>/<rev>/<f>``
 rendered images and PDF, ``/events`` server-sent events (a render finished),
-``/healthz``. Optional password: ``VIEWER_PASSWORD`` (user ``VIEWER_USER``,
-default ``viewer``) — a login page with a session cookie for browsers
-(``/login``, ``/logout``), Basic auth for scripts.
+``/healthz`` (always open). Who may see the rest: ``VIEWER_AUTH_MODE``
+(see auth.py) — ``local`` (``/login``, ``/logout``, Basic auth for
+scripts), ``none``, ``oidc`` (``/auth/login``, ``/auth/callback``) or
+``proxy``.
 """
 from __future__ import annotations
 
 import base64
-import hashlib
-import hmac
 import json
 import os
 import re
-import secrets
 import sys
 import threading
 import time
 from html import escape
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from mcp_http.appbridge import App, log
 
+from .auth import Auth, User
 from .render import CACHE_DIR, POLL, Renderer
 
 renderer: Renderer
-USER = os.environ.get("VIEWER_USER", "viewer")
-PASSWORD = os.environ.get("VIEWER_PASSWORD", "")
+auth: Auth
 TITLE = os.environ.get("VIEWER_TITLE", "IngeTrazo viewer")
 _SAFE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -98,6 +96,8 @@ header.bar{flex-wrap:wrap}header.bar h1{max-width:none;flex:1}header.bar .meta{d
 .navs{order:9;flex:1 1 100%}.navs .dd{position:static;flex:1 1 0}.dd>summary{max-width:none}
 .dd .cur{flex:1 1 auto}
 .dd-panel{left:12px;width:auto;right:12px}}
+.who{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:14em}
+@media (max-width:820px){.who{display:none}}
 """
 
 JS = """
@@ -196,16 +196,26 @@ JS = """
 """
 
 
-LOGOUT = '<a class="btn" href="/logout">Log out</a>'
+def _account(user: User | None) -> str:
+    """The top bar's right end: who is logged in, and the way out."""
+    if user is None or auth.mode == "none":
+        return ""
+    who = ""
+    if auth.mode in ("oidc", "proxy"):
+        role = " (admin)" if user.role == "admin" else ""
+        who = f'<span class="muted who" title="{escape(user.name + role)}">{escape(user.name)}</span>'
+    out = ('<a class="btn" href="/logout">Log out</a>'
+           if auth.mode != "proxy" or auth.proxy.logout_url else "")
+    return who + out
 
 
 def _page(title: str, header: str, body: str, slug: str | None = None,
-          bar: bool = False) -> bytes:
+          bar: bool = False, user: User | None = None) -> bytes:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{escape(title)}</title><style>{CSS}</style></head>
 <body data-slug="{escape(slug or '')}"><header{' class="bar"' if bar else ''}>{header}{'' if bar else '<span class="spacer"></span>'}
-<span id="live" class="live"><i></i><span>connecting…</span></span>{LOGOUT if PASSWORD else ""}</header>
+<span id="live" class="live"><i></i><span>connecting…</span></span>{_account(user)}</header>
 <main>{body}</main><script>{JS}</script></body></html>""".encode("utf-8")
 
 
@@ -275,7 +285,7 @@ def _dropdown(label: str, entries: list[tuple[str, str, list[str]]]) -> str:
             '<div class="dd-empty" hidden>Nothing matches.</div></div></details>')
 
 
-def overview() -> bytes:
+def overview(user: User | None = None) -> bytes:
     cards = []
     for m in renderer.models():
         idx = m["index"]
@@ -298,15 +308,16 @@ def overview() -> bytes:
                      f'<div class="sub">{status}</div></div></a>')
     body = (f'<div class="grid">{"".join(cards)}</div>' if cards else
             '<p class="empty">No .igz files in the data folder yet.</p>')
-    return _page(TITLE, f"<h1>{escape(TITLE)}</h1>", body)
+    return _page(TITLE, f"<h1>{escape(TITLE)}</h1>", body, user=user)
 
 
-def model_page(slug: str) -> bytes | None:
+def model_page(slug: str, user: User | None = None) -> bytes | None:
     idx = renderer.index(slug)
     if idx is None:
         if any(m["slug"] == slug for m in renderer.models()):
             return _page(TITLE, f'<a class="btn" href="/">← All models</a>',
-                         '<p class="empty">Rendering… this page refreshes when it is done.</p>', slug)
+                         '<p class="empty">Rendering… this page refreshes when it is done.</p>',
+                         slug, user=user)
         return None
     sheet_nav, view_nav, sheets_html = [], [], []
     for i, s in enumerate(idx.get("sheets", [])):
@@ -350,60 +361,50 @@ def model_page(slug: str) -> bytes | None:
               f'<h1 title="{escape(idx["name"])}">{escape(idx["name"])}</h1>'
               + (f'<nav class="navs">{navs}</nav>' if navs else "")
               + f'<span class="spacer"></span><span class="meta">rendered {_when(idx)}</span>{pdf}')
-    return _page(f'{idx["name"]} – {TITLE}', header, content, slug, bar=True)
+    return _page(f'{idx["name"]} – {TITLE}', header, content, slug, bar=True, user=user)
 
 
 COOKIE = "itz_viewer"
-SESSION_DAYS = int(os.environ.get("VIEWER_SESSION_DAYS", 30))
-#: Signs the session cookies; new on every start, so a restart logs out.
-_SECRET = secrets.token_bytes(32)
-
-
-def _credentials_ok(user: str, pw: str) -> bool:
-    return (hmac.compare_digest(user.encode(), USER.encode())
-            & hmac.compare_digest(pw.encode(), PASSWORD.encode()))
-
-
-def _sign(expiry: str) -> str:
-    return hmac.new(_SECRET, f"{USER}|{expiry}".encode(), hashlib.sha256).hexdigest()
-
-
-def _new_session() -> str:
-    expiry = str(int(time.time()) + SESSION_DAYS * 86400)
-    return f"{expiry}.{_sign(expiry)}"
-
-
-def _session_valid(value: str) -> bool:
-    expiry, _, sig = value.partition(".")
-    if not expiry.isdigit() or int(expiry) < time.time():
-        return False
-    return hmac.compare_digest(sig, _sign(expiry))
 
 
 def _safe_next(value: str) -> str:
-    """Only a path on this server (no //host, no scheme)."""
-    return value if value.startswith("/") and not value.startswith("//") else "/"
+    """Only a path on this server (no //host, no /\\host, no scheme)."""
+    return (value if value.startswith("/") and not value.startswith(("//", "/\\"))
+            else "/")
+
+
+LOGIN_CSS = """
+.login{max-width:340px;margin:12vh auto;background:var(--card);border:1px solid var(--line);
+border-radius:12px;padding:24px;box-shadow:var(--shadow)}
+.login h1{font-size:18px;margin:0 0 16px}.login label{display:block;font-size:13px;color:var(--muted);margin:12px 0 4px}
+.login input{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;
+background:var(--bg);color:var(--fg);font:inherit}
+.login button,.login .go{display:block;text-align:center;margin-top:18px;width:100%;padding:9px;border:0;border-radius:6px;
+background:var(--accent);color:#fff;font:inherit;font-weight:600;cursor:pointer}
+.login .go:hover{text-decoration:none}.login p{margin:0 0 8px}
+.err{color:#c0392b;font-size:14px;margin:0 0 8px}
+"""
+
+
+def _card(title: str, inner: str) -> bytes:
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{escape(title)} – {escape(TITLE)}</title><style>{CSS}{LOGIN_CSS}</style></head>
+<body><main><div class="login"><h1>{escape(TITLE)}</h1>{inner}</div></main></body></html>""".encode("utf-8")
 
 
 def login_page(error: str, nxt: str) -> bytes:
     err = f'<p class="err">{escape(error)}</p>' if error else ""
-    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Log in – {escape(TITLE)}</title><style>{CSS}
-.login{{max-width:340px;margin:12vh auto;background:var(--card);border:1px solid var(--line);
-border-radius:12px;padding:24px;box-shadow:var(--shadow)}}
-.login h1{{font-size:18px;margin:0 0 16px}}.login label{{display:block;font-size:13px;color:var(--muted);margin:12px 0 4px}}
-.login input{{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;
-background:var(--bg);color:var(--fg);font:inherit}}
-.login button{{margin-top:18px;width:100%;padding:9px;border:0;border-radius:6px;background:var(--accent);
-color:#fff;font:inherit;font-weight:600;cursor:pointer}}
-.err{{color:#c0392b;font-size:14px;margin:0 0 8px}}</style></head>
-<body><main><form class="login" method="post" action="/login">
-<h1>{escape(TITLE)}</h1>{err}
+    return _card("Log in", f"""<form method="post" action="/login">{err}
 <input type="hidden" name="next" value="{escape(nxt)}">
-<label for="u">User</label><input id="u" name="user" autocomplete="username" value="{escape(USER)}">
+<label for="u">User</label><input id="u" name="user" autocomplete="username" value="{escape(auth.user_name)}">
 <label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" autofocus>
-<button type="submit">Log in</button></form></main></body></html>""".encode("utf-8")
+<button type="submit">Log in</button></form>""")
+
+
+def message_page(text: str, link: str = "", label: str = "", extra: str = "") -> bytes:
+    go = f'<a class="go" href="{escape(link)}">{escape(label)}</a>' if link else ""
+    return _card(label or "Viewer", f"<p>{escape(text)}</p>{extra}{go}")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -425,89 +426,167 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     # ---- authentication ------------------------------------------------------
-    # Browsers get a login page and a session cookie: embedded browsers
-    # (VS Code's, many WebViews) never show the Basic-auth dialog and only
-    # print the 401. Scripts and curl keep using Basic auth.
-    def _cookie_ok(self) -> bool:
+    # Browsers get a login page (local) or the provider's (oidc), then a
+    # session cookie: embedded browsers (VS Code's, many WebViews) never
+    # show the Basic-auth dialog and only print the 401. Scripts and curl
+    # use Basic auth (local). A proxy (proxy) names the user on every request.
+    def _cookie_user(self) -> User | None:
         jar = SimpleCookie()
         try:
             jar.load(self.headers.get("Cookie", ""))
         except CookieError:
-            return False
+            return None
         morsel = jar.get(COOKIE)
-        return morsel is not None and _session_valid(morsel.value)
+        return None if morsel is None else auth.sessions.read(morsel.value)
 
-    def _basic_ok(self) -> bool:
+    def _basic_user(self) -> User | None:
         value = self.headers.get("Authorization", "")
         if not value.startswith("Basic "):
-            return False
+            return None
         try:
             user, _, pw = base64.b64decode(value[6:]).decode().partition(":")
         except ValueError:
-            return False
-        return _credentials_ok(user, pw)
+            return None
+        return User(user, "admin") if auth.credentials_ok(user, pw) else None
 
-    def _authorised(self, path: str) -> bool:
-        if not PASSWORD or self._cookie_ok() or self._basic_ok():
-            return True
+    def _user(self) -> User | None:
+        if auth.mode == "none":
+            return User("anonymous")
+        if auth.mode == "proxy":
+            return auth.from_proxy(self.client_address[0], self.headers)
+        user = self._cookie_user()
+        if user is None and auth.mode == "local":
+            user = self._basic_user()
+        return user
+
+    def _authorised(self, path: str) -> User | None:
+        user = self._user()
+        if user is not None:
+            return user
         wants_html = "text/html" in self.headers.get("Accept", "")
-        if wants_html and not path.startswith(("/files/", "/events")):
-            target = self.path if self.path.startswith("/") else "/"
+        page = wants_html and not path.startswith(("/files/", "/events"))
+        target = self.path if self.path.startswith("/") else "/"
+        if auth.mode == "proxy":
+            if page:
+                self._html(401, message_page(
+                    "This viewer is reached through its login proxy, which did "
+                    "not name a user."))
+            else:
+                self._send(401, b"authentication required (through the proxy)\n",
+                           "text/plain")
+        elif page:
+            where = "/login" if auth.mode == "local" else "/auth/login"
             self._send(303, b"", "text/plain",
-                       {"Location": "/login?next=" + quote(target, safe="")})
-        else:
+                       {"Location": where + "?next=" + quote(target, safe="")})
+        elif auth.mode == "local":
             self._send(401, b"authentication required\n", "text/plain",
                        {"WWW-Authenticate": f'Basic realm="{TITLE}", charset="UTF-8"'})
-        return False
+        else:
+            self._send(401, b"authentication required\n", "text/plain")
+        return None
 
     def _secure(self) -> bool:
         return (self.headers.get("X-Forwarded-Proto", "").lower() == "https"
-                or os.environ.get("VIEWER_COOKIE_SECURE", "").lower() in ("1", "true", "yes"))
+                or os.environ.get("VIEWER_COOKIE_SECURE", "").lower() in ("1", "true", "yes")
+                or (auth.mode == "oidc" and auth.oidc.redirect_uri.startswith("https://")))
+
+    def _html(self, status: int, body: bytes, extra: dict | None = None):
+        self._send(status, body, "text/html; charset=utf-8",
+                   {"Cache-Control": "no-store", **(extra or {})})
 
     def _login_page(self, status: int = 200, error: str = "", nxt: str = "/"):
-        self._send(status, login_page(error, nxt), "text/html; charset=utf-8",
-                   {"Cache-Control": "no-store"})
+        self._html(status, login_page(error, nxt))
+
+    def _session_cookie(self, user: User) -> str:
+        return (f"{COOKIE}={auth.sessions.issue(user)}; Path=/; HttpOnly; SameSite=Lax; "
+                f"Max-Age={auth.sessions.max_age}" + ("; Secure" if self._secure() else ""))
 
     def do_POST(self):
         path = urlsplit(self.path).path
-        if path != "/login":
+        if path != "/login" or auth.mode != "local":
             return self._send(404, b"not found\n", "text/plain")
         length = min(int(self.headers.get("Content-Length") or 0), 4096)
         form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
         user = (form.get("user") or [""])[0]
         pw = (form.get("password") or [""])[0]
         nxt = _safe_next((form.get("next") or ["/"])[0])
-        if not PASSWORD or _credentials_ok(user, pw):
-            cookie = (f"{COOKIE}={_new_session()}; Path=/; HttpOnly; SameSite=Lax; "
-                      f"Max-Age={SESSION_DAYS * 86400}" + ("; Secure" if self._secure() else ""))
-            return self._send(303, b"", "text/plain", {"Location": nxt, "Set-Cookie": cookie})
+        if auth.credentials_ok(user, pw):
+            return self._send(303, b"", "text/plain", {
+                "Location": nxt, "Set-Cookie": self._session_cookie(User(user, "admin"))})
         time.sleep(0.7)                          # slows down guessing
         return self._login_page(401, "Wrong user name or password.", nxt)
 
     def do_HEAD(self):
         self.do_GET()
 
+    def _account_routes(self, path: str, query: dict) -> bool:
+        """/login, /logout and the OIDC flow; True when one answered."""
+        nxt = _safe_next((query.get("next") or ["/"])[0])
+        clear = f"{COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+        if path == "/login":
+            if auth.mode == "local":
+                self._login_page(nxt=nxt)
+            elif auth.mode == "oidc":
+                self._send(303, b"", "text/plain",
+                           {"Location": "/auth/login?" + urlencode({"next": nxt})})
+            else:
+                self._send(303, b"", "text/plain", {"Location": nxt})
+            return True
+        if path == "/logout":
+            if auth.mode == "local":
+                self._send(303, b"", "text/plain",
+                           {"Location": "/login", "Set-Cookie": clear})
+            elif auth.mode == "oidc":
+                end = auth.oidc.end_session()
+                extra = (f'<p class="muted"><a href="{escape(end)}?'
+                         f'{escape(urlencode({"client_id": auth.oidc.client_id}))}">'
+                         "Also log out of the identity provider</a></p>" if end else "")
+                self._html(200, message_page("You are logged out of the viewer.",
+                                             "/auth/login", "Log in again", extra),
+                           {"Set-Cookie": clear})
+            elif auth.mode == "proxy" and auth.proxy.logout_url:
+                self._send(303, b"", "text/plain", {"Location": auth.proxy.logout_url})
+            else:
+                self._send(303, b"", "text/plain", {"Location": "/"})
+            return True
+        if auth.mode != "oidc" or path not in ("/auth/login", "/auth/callback"):
+            return False
+        try:
+            if path == "/auth/login":
+                self._send(303, b"", "text/plain", {"Location": auth.oidc.start(nxt)})
+                return True
+            if query.get("error"):
+                raise ValueError(f"the provider said: {query['error'][0]} "
+                                 + (query.get("error_description") or [""])[0])
+            user, groups, nxt = auth.oidc.finish((query.get("code") or [""])[0],
+                                                 (query.get("state") or [""])[0])
+        except (OSError, ValueError) as exc:
+            log(f"viewer: OIDC login failed: {exc}")
+            self._html(502 if isinstance(exc, OSError) else 400, message_page(
+                f"The login did not work: {exc}", "/auth/login", "Try again"))
+            return True
+        auth.logged_in(user, groups)
+        self._send(303, b"", "text/plain",
+                   {"Location": _safe_next(nxt), "Set-Cookie": self._session_cookie(user)})
+        return True
+
     def do_GET(self):
         parts = urlsplit(self.path)
         path = parts.path
         if path == "/healthz":
             return self._health()
-        if path == "/login":
-            nxt = _safe_next((parse_qs(parts.query).get("next") or ["/"])[0])
-            return self._login_page(nxt=nxt)
-        if path == "/logout":
-            return self._send(303, b"", "text/plain", {
-                "Location": "/login",
-                "Set-Cookie": f"{COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"})
-        if not self._authorised(path):
+        if self._account_routes(path, parse_qs(parts.query)):
+            return None
+        user = self._authorised(path)
+        if user is None:
             return None
         html = "text/html; charset=utf-8"
         nocache = {"Cache-Control": "no-store"}
         if path == "/":
-            return self._send(200, overview(), html, nocache)
+            return self._send(200, overview(user), html, nocache)
         if path.startswith("/m/"):
             slug = path[3:]
-            page = model_page(slug) if _SAFE.match(slug) else None
+            page = model_page(slug, user) if _SAFE.match(slug) else None
             if page is None:
                 return self._send(404, b"no such model\n", "text/plain")
             return self._send(200, page, html, nocache)
@@ -570,14 +649,15 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    global renderer
+    global renderer, auth
+    auth = Auth()                    # a wrong setting stops here, before IngeTrazo
     app = App()
     renderer = Renderer(app)
     port = int(os.environ.get("VIEWER_PORT", 8080))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, name="http", daemon=True).start()
-    log(f"viewer on :{port} (auth: {'basic' if PASSWORD else 'none'}); cache {CACHE_DIR}")
+    log(f"viewer on :{port} (auth: {auth.describe()}); cache {CACHE_DIR}")
     app.start(None, allow_save=False)
     renderer.run()
 
