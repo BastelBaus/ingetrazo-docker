@@ -18,6 +18,9 @@ WORK="${SMOKE_WORKDIR:-$(mktemp -d)}"
 PY="${PYTHON:-python3}"
 command -v "$PY" >/dev/null 2>&1 || PY=python
 mcp="smoke-mcp-$$"
+mcp_oauth="smoke-mcp-oauth-$$"
+OAUTH_PORT="${SMOKE_OAUTH_PORT:-18766}"
+OAUTH_PASSWORD="smoke-oauth-password"
 viewer="smoke-viewer-$$"
 # The other VIEWER_AUTH_MODEs: none, proxy, oidc (with a mock provider).
 v_none="smoke-viewer-none-$$"
@@ -39,11 +42,12 @@ cleanup() {
   if [ $status -ne 0 ]; then
     echo "---- logs: mcp ----";    docker logs "$mcp" 2>&1 | tail -60 || true
     echo "---- logs: viewer ----"; docker logs "$viewer" 2>&1 | tail -60 || true
+    echo "---- logs: mcp (oauth) ----"; docker logs "$mcp_oauth" 2>&1 | tail -40 || true
     for c in "$v_none" "$v_proxy" "$v_oidc" "$oidc"; do
       echo "---- logs: $c ----"; docker logs "$c" 2>&1 | tail -30 || true
     done
   fi
-  docker rm -f -v "$mcp" "$viewer" "$v_none" "$v_proxy" "$v_oidc" "$oidc" >/dev/null 2>&1 || true
+  docker rm -f -v "$mcp" "$viewer" "$mcp_oauth" "$v_none" "$v_proxy" "$v_oidc" "$oidc" >/dev/null 2>&1 || true
   docker network rm "$net" >/dev/null 2>&1 || true
   exit $status
 }
@@ -83,7 +87,19 @@ docker run -d --name "$v_oidc" --network "$net" -p "127.0.0.1:$OIDC_VIEWER_PORT:
   -e OIDC_ALLOW_HTTP=true -e OIDC_ADMIN_GROUP=viewer-admins \
   -v "$DATA:/data:ro" "$IMAGE" viewer >/dev/null
 
+docker run -d --name "$mcp_oauth" -p "127.0.0.1:$OAUTH_PORT:8765" \
+  -e MCP_AUTH=oauth -e PUBLIC_URL="http://127.0.0.1:$OAUTH_PORT" -e OAUTH_ALLOW_HTTP=true \
+  -e OAUTH_USER=admin -e OAUTH_PASSWORD="$OAUTH_PASSWORD" "$IMAGE" mcp >/dev/null
+
 "$PY" "$TESTS/smoke_mcp.py" "http://127.0.0.1:$MCP_PORT" "$TOKEN"
+"$PY" "$TESTS/smoke_oauth.py" "http://127.0.0.1:$OAUTH_PORT" admin "$OAUTH_PASSWORD"
+echo "== MCP_AUTH=oauth refuses to start without an https PUBLIC_URL"
+if out="$(docker run --rm -e MCP_AUTH=oauth -e PUBLIC_URL=http://example.org \
+            -e OAUTH_PASSWORD="$OAUTH_PASSWORD" "$IMAGE" mcp 2>&1)"; then
+  echo "it started"; exit 1
+fi
+echo "$out" | grep -q "PUBLIC_URL must be https"
+echo "  ok"
 "$PY" "$TESTS/smoke_viewer.py" "http://127.0.0.1:$VIEWER_PORT" viewer "$PASSWORD"
 
 echo "== viewer, VIEWER_AUTH_MODE=local without a password"

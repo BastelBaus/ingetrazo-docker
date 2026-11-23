@@ -56,6 +56,40 @@ claude mcp add --transport http ingetrazo http://localhost:8765/mcp \
 
 Any client that speaks Streamable HTTP works the same way: URL plus `Authorization` header.
 
+### Connect claude.ai (OAuth)
+
+Remote connectors such as claude.ai's custom connectors log in with OAuth instead of a static token. Set
+`MCP_AUTH=oauth`, and put the server behind TLS at a public URL, e.g. with [Caddy](https://caddyserver.com):
+
+```caddyfile
+mcp.example.org {
+	reverse_proxy 127.0.0.1:8765
+}
+```
+
+```sh
+MCP_AUTH=oauth
+PUBLIC_URL=https://mcp.example.org
+OAUTH_USER=admin
+OAUTH_PASSWORD=<at least 12 characters>
+```
+
+In claude.ai, add a custom connector with the URL `https://mcp.example.org/mcp`. claude.ai registers itself, and
+you approve it once on the server's consent page with `OAUTH_USER` / `OAUTH_PASSWORD`.
+
+The container is its own small OAuth 2.1 authorization server:
+- metadata: RFC 9728 at `/.well-known/oauth-protected-resource`, RFC 8414 at `/.well-known/oauth-authorization-server`;
+- dynamic client registration (RFC 7591) at `/register`;
+- the authorization code flow with PKCE (S256 only);
+- access tokens that expire (`OAUTH_ACCESS_TOKEN_SECONDS`, 3600) and refresh tokens that rotate on every use
+  (`OAUTH_REFRESH_TOKEN_DAYS`, 30).
+
+Clients and tokens are kept in `/state/oauth.json`, tokens and client secrets only as SHA-256 hashes. Only redirect
+URIs on `OAUTH_REDIRECT_URIS` may register. The default allows claude.ai's and claude.com's callbacks, and
+`http://localhost` / `127.0.0.1` on any port for the MCP Inspector and Claude Code on the same machine. Entries
+match by scheme and host, and the path by prefix. A wrong password on the consent page is slowed down, and after
+20 wrong passwords in 15 minutes the consent page refuses for a while.
+
 ## Configuration
 
 All settings are environment variables. See [`.env.example`](.env.example) for the full list.
@@ -68,6 +102,9 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `INGETRAZO_SAVE_FORMAT` | – | `json` = plain-JSON `.igz`, diffable in git |
 | `MCP_AUTH` | `token` | `none`, `token` or `oauth` |
 | `MCP_TOKEN` | – | Bearer token, at least 16 characters (`token` mode) |
+| `PUBLIC_URL` | – | `oauth`: the https URL clients reach the server at |
+| `OAUTH_USER` / `OAUTH_PASSWORD` | `admin` / – | `oauth`: who approves clients (password at least 12 characters) |
+| `OAUTH_REDIRECT_URIS` | claude.ai, claude.com, loopback | `oauth`: redirect URIs clients may register (comma-separated) |
 | `VIEWER_AUTH_MODE` | `local` | Viewer login: `local`, `none`, `oidc` or `proxy` (see [Viewer login](#viewer-login)) |
 | `VIEWER_PASSWORD` | – | `local`: the password (user `VIEWER_USER`); login page for browsers, Basic auth for scripts |
 | `VIEWER_SHEET_DPI` | `120` | Sheet image resolution |
