@@ -31,6 +31,7 @@ git clone https://github.com/BastelBaus/ingetrazo-docker
 cd ingetrazo-docker
 cp .env.example .env
 # set MCP_TOKEN in .env, e.g. to the output of: openssl rand -hex 32
+# and VIEWER_PASSWORD (or VIEWER_AUTH_MODE=none for a viewer without login)
 mkdir -p data && cp /path/to/*.igz data/
 
 docker compose --profile viewer up -d
@@ -40,7 +41,7 @@ This pulls the prebuilt image `ghcr.io/bastelbaus/ingetrazo:latest` (amd64 and a
 Add `--build` to build it locally instead, e.g. against another `INGETRAZO_REF`.
 
 - MCP: `http://localhost:8765/mcp` (bearer token)
-- Viewer: `http://localhost:8080`
+- Viewer: `http://localhost:8080` (user `viewer`, your `VIEWER_PASSWORD`)
 
 Both ports are published on `127.0.0.1` only by default (`MCP_BIND`, `VIEWER_BIND`).
 
@@ -67,7 +68,8 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `INGETRAZO_SAVE_FORMAT` | – | `json` = plain-JSON `.igz`, diffable in git |
 | `MCP_AUTH` | `token` | `none`, `token` or `oauth` |
 | `MCP_TOKEN` | – | Bearer token, at least 16 characters (`token` mode) |
-| `VIEWER_PASSWORD` | – | Viewer password (user `VIEWER_USER`): login page for browsers, Basic auth for scripts |
+| `VIEWER_AUTH_MODE` | `local` | Viewer login: `local`, `none`, `oidc` or `proxy` (see [Viewer login](#viewer-login)) |
+| `VIEWER_PASSWORD` | – | `local`: the password (user `VIEWER_USER`); login page for browsers, Basic auth for scripts |
 | `VIEWER_SHEET_DPI` | `120` | Sheet image resolution |
 | `INGETRAZO_IMAGE` | `ghcr.io/bastelbaus/ingetrazo:latest` | Image to pull (or tag to build) |
 | `INGETRAZO_REPO` / `INGETRAZO_REF` | fork / pinned commit | Which IngeTrazo to build |
@@ -93,9 +95,72 @@ software (Mesa llvmpipe) inside an in-memory X server (Xvfb).
   web pages, and server-sent events reload an open page when a new render is ready.
 
 Health: `GET /healthz` on both ports, used by the image's `HEALTHCHECK`. For the MCP service it checks that the
-IngeTrazo process is alive and that its bridge answers (`document_info`). The check goes through the same
-connection as the MCP requests, because the bridge serves one client at a time; during a long tool call it reports
-`busy`.
+IngeTrazo process is alive and that its bridge answers (`list_documents`). The check queues behind the MCP
+requests, because the bridge works one request at a time; during a long tool call it reports `busy`. `/healthz` of
+the viewer needs no login in any mode.
+
+## Viewer login
+
+`VIEWER_AUTH_MODE` (`AUTH_MODE` works too) says who may see the viewer. `/healthz` is always open.
+
+| Mode | Who gets in | Settings |
+|---|---|---|
+| `local` (default) | The one user `VIEWER_USER` with `VIEWER_PASSWORD`: a login page and a session cookie for browsers, Basic auth for scripts. Without a password the viewer does **not** start. | `VIEWER_USER`, `VIEWER_PASSWORD` |
+| `none` | Anyone who reaches the port, on purpose (a trusted network, a public showcase). A warning in the log; no Log out button. | – |
+| `oidc` | Users of an OpenID Connect provider (Authentik, Keycloak, …): authorization code flow with PKCE. | `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_REDIRECT_URI`; optional `OIDC_SCOPES`, `OIDC_ADMIN_GROUP`, `OIDC_USERNAME_CLAIM`, `OIDC_GROUPS_CLAIM` |
+| `proxy` | Users a reverse proxy with forward auth (Traefik or nginx with Authentik) has logged in; the proxy names them in a header. The header is believed only from `PROXY_TRUSTED_IPS`. | `PROXY_TRUSTED_IPS`; optional `PROXY_USER_HEADER` (default `X-authentik-username`), `PROXY_GROUPS_HEADER`, `PROXY_ADMIN_GROUP`, `PROXY_LOGOUT_URL` |
+
+With `oidc` and `proxy` a user is added to `/state/users.json` on first login, with the role `admin` when in the
+admin group, else `viewer`. The viewer is read-only, so both roles see the same today. There is no LDAP client in
+the container: user sources such as LDAP are configured in the identity provider.
+
+Sessions (`local`, `oidc`) last `VIEWER_SESSION_DAYS` (30) and end when the container restarts.
+
+### Authentik with OIDC
+
+1. In Authentik, create an **OAuth2/OpenID Provider** (confidential client) with the redirect URI
+   `https://viewer.example.org/auth/callback`, and an **Application** that uses it, e.g. with slug `ingetrazo-viewer`.
+2. In `.env`:
+
+   ```sh
+   VIEWER_AUTH_MODE=oidc
+   OIDC_ISSUER_URL=https://auth.example.org/application/o/ingetrazo-viewer/
+   OIDC_CLIENT_ID=<client id from Authentik>
+   OIDC_CLIENT_SECRET=<client secret from Authentik>
+   OIDC_REDIRECT_URI=https://viewer.example.org/auth/callback
+   OIDC_ADMIN_GROUP=ingetrazo-admins      # optional
+   ```
+
+Authentik's default `profile` scope includes the user's `groups`. For Keycloak, add a "Group Membership" mapper
+(claim `groups`, without the full path) to the client. The issuer and the redirect URI must be `https://`: the ID
+token comes straight from the provider's token endpoint over TLS and with the client secret, so its signature is
+not checked (OpenID Connect Core 3.1.3.7), while issuer, audience, expiry and nonce are. `OIDC_ALLOW_HTTP=true`
+lifts that for a lab.
+
+### Authentik as forward auth (Traefik)
+
+Authentik's proxy outpost logs the user in; Traefik asks it on every request and passes the user on.
+
+```yaml
+services:
+  viewer:
+    environment:
+      VIEWER_AUTH_MODE: proxy
+      PROXY_TRUSTED_IPS: 172.30.0.0/24        # the network Traefik reaches the viewer on
+      PROXY_GROUPS_HEADER: X-authentik-groups
+      PROXY_ADMIN_GROUP: ingetrazo-admins
+      PROXY_LOGOUT_URL: /outpost.goauthentik.io/sign_out
+    labels:
+      traefik.http.routers.itz-viewer.rule: Host(`viewer.example.org`)
+      traefik.http.routers.itz-viewer.middlewares: authentik@docker
+      traefik.http.middlewares.authentik.forwardauth.address: http://authentik-server:9000/outpost.goauthentik.io/auth/traefik
+      traefik.http.middlewares.authentik.forwardauth.trustForwardHeader: "true"
+      traefik.http.middlewares.authentik.forwardauth.authResponseHeaders: X-authentik-username,X-authentik-groups
+```
+
+Set `PROXY_TRUSTED_IPS` to the proxy's address or network only, and don't publish the viewer's port elsewhere:
+anyone else who can reach it could send the header themselves. With nginx, use `auth_request` to the outpost and
+`proxy_set_header X-authentik-username $authentik_username;` (see Authentik's nginx docs).
 
 ## Security
 
