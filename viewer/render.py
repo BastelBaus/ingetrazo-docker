@@ -48,6 +48,36 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _path(folder) -> list[str]:
+    """A folder as the app reports it ("A/B", a list, or nothing) as a list
+    of names, top first."""
+    if isinstance(folder, (list, tuple)):
+        return [str(p) for p in folder if str(p).strip()]
+    return [p for p in str(folder or "").split("/") if p.strip()]
+
+
+_MARK = "@@itz-viewer@@"
+#: Read-only: each saved view's folder path, walking the Scenes tab's
+#: nesting (core.scene_folders). Runs in a function so it leaves nothing
+#: behind in the app's Python scope.
+_SCENE_FOLDERS = f"""
+def _itz_viewer_paths():
+    import json
+    from core import scene_folders as sf
+    out = {{}}
+    for v in scene.saved_views:
+        path, f, seen = [], sf.folder_of(scene, v), set()
+        while f and f not in seen:
+            seen.add(f)
+            path.insert(0, f)
+            f = sf.folder_parent(scene, f)
+        out[v.name] = path
+    print({_MARK!r} + json.dumps(out, ensure_ascii=False))
+_itz_viewer_paths()
+del _itz_viewer_paths
+"""
+
+
 class Renderer:
     def __init__(self, app: App) -> None:
         self.app = app
@@ -151,12 +181,15 @@ class Renderer:
                         index["pdf"] = "sheets.pdf"
                     except RuntimeError as exc:
                         index["errors"].append(f"PDF: {exc}")
-            for i, view in enumerate(info.get("views") or []):
+            views = list(info.get("views") or [])
+            folders = self._view_folders() if views else {}
+            for i, view in enumerate(views):
                 file = f"view-{i:02d}.png"
                 try:
                     self._call("export_view", {"view": view, "path": str(out / file),
                                                "width": VIEW_W, "height": VIEW_H})
-                    index["views"].append({"name": view, "file": file})
+                    index["views"].append({"name": view, "file": file,
+                                           "folder": folders.get(view, [])})
                 except RuntimeError as exc:
                     index["errors"].append(f"view {view}: {exc}")
         except Exception as exc:
@@ -177,21 +210,42 @@ class Renderer:
         self._notify({"slug": slug, "rev": rev})
 
     def _sheet_list(self, info: dict) -> list[dict]:
-        """Every sheet in document order, with its folder and print flag
-        when the app reports them."""
+        """Every sheet in document order, with its folder path (a list of
+        names, top first) and print flag when the app reports them."""
         names = list(info.get("sheets") or [])
         if not names:
             return []
         try:
             listed = self._call("list_sheets")
-            rows = listed.get("sheets") if isinstance(listed, dict) else None
+            rows = listed.get("sheets") if isinstance(listed, dict) else listed
             if isinstance(rows, list) and len(rows) == len(names):
-                return [{"name": r.get("name", n), "folder": r.get("folder") or "",
+                return [{"name": r.get("name", n), "folder": _path(r.get("folder")),
                          "printed": r.get("printed", r.get("print_in_all", True))}
                         for r, n in zip(rows, names)]
         except RuntimeError:
             pass
-        return [{"name": n, "folder": "", "printed": True} for n in names]
+        return [{"name": n, "folder": [], "printed": True} for n in names]
+
+    def _view_folders(self) -> dict[str, list[str]]:
+        """Saved view name → its folder path (top first). ``list_scenes``
+        names only the innermost folder, so the nesting is read from the
+        document (read-only); without it, the innermost folder alone."""
+        try:
+            reply = self._call("run_python", {"code": _SCENE_FOLDERS})
+            if not reply.get("error"):
+                for line in (reply.get("stdout") or "").splitlines():
+                    if line.startswith(_MARK):
+                        got = json.loads(line[len(_MARK):])
+                        return {str(k): [str(p) for p in v] for k, v in got.items()}
+        except (RuntimeError, ValueError, AttributeError):
+            pass
+        try:
+            listed = self._call("list_scenes")
+            rows = listed.get("scenes") if isinstance(listed, dict) else listed
+            return {r["name"]: _path(r.get("folder")) for r in rows or []
+                    if isinstance(r, dict) and "name" in r}
+        except (RuntimeError, KeyError, TypeError):
+            return {}
 
     def _render_sheets(self, out: Path, sheets: list[dict]) -> tuple[list, list]:
         errors: list[str] = []

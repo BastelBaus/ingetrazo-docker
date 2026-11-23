@@ -61,11 +61,28 @@ main{padding:16px;max-width:1500px;margin:0 auto}
 .card .thumb img{max-width:100%;max-height:100%;object-fit:contain}
 .card .body{padding:10px 12px}.card .name{font-weight:600;overflow-wrap:anywhere}
 .card .sub{color:var(--muted);font-size:13px}
-.layout{display:grid;grid-template-columns:220px 1fr;gap:24px}
-nav.toc{position:sticky;top:64px;align-self:start;max-height:calc(100vh - 80px);overflow:auto;font-size:14px}
-nav.toc h3{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:14px 0 6px}
-nav.toc a{display:block;padding:3px 8px;border-radius:5px;color:var(--fg)}nav.toc a:hover{background:var(--card);text-decoration:none}
-nav.toc .folder{color:var(--muted);font-size:12px;padding:6px 8px 2px}
+header.bar{padding:6px 12px;gap:8px;flex-wrap:nowrap}
+header.bar h1{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:3em;max-width:22vw}
+.navs{display:flex;gap:8px;min-width:0;flex:0 1 auto}
+.dd{position:relative;min-width:0}
+.dd>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:6px;max-width:38vw;
+border:1px solid var(--line);background:var(--card);padding:4px 8px;border-radius:6px;font-size:13px;white-space:nowrap;overflow:hidden}
+.dd>summary::-webkit-details-marker{display:none}
+.dd>summary::after{content:"";border:4px solid transparent;border-top-color:var(--muted);margin:4px 0 0 2px}
+.dd[open]>summary,.dd>summary:hover{border-color:var(--accent)}
+.dd .k{flex:none;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+.dd .cur{flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;min-width:0}.dd>summary::after{flex:none}.dd .cur .p{color:var(--muted)}
+.dd-panel{position:absolute;top:calc(100% + 6px);left:0;z-index:10;width:min(380px,calc(100vw - 24px));
+max-height:min(70vh,560px);display:flex;flex-direction:column;background:var(--card);border:1px solid var(--line);
+border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.18)}
+.dd-filter{margin:8px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit;font-size:14px}
+.dd-list{overflow:auto;padding:4px 0 8px;font-size:14px}
+.dd-list a,.dd-list .f{display:block;padding:3px 12px 3px calc(12px + var(--d,0) * 14px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dd-list a{color:var(--fg)}.dd-list a:hover{background:var(--bg);text-decoration:none}
+.dd-list a.on{background:color-mix(in srgb,var(--accent) 14%,transparent);font-weight:600}
+.dd-list .f{color:var(--muted);font-size:12px;padding-top:7px}.dd-list .f::before{content:"▸ "}
+.dd-list .none{font-style:italic}.dd-list .none::before{content:""}
+.dd-empty{color:var(--muted);padding:6px 12px;font-size:13px}
 section h2{font-size:15px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:8px 0 12px}
 figure{margin:0 0 28px;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)}
 figure a.img{display:block;background:var(--sheet)}
@@ -76,8 +93,11 @@ figcaption .muted,.muted{color:var(--muted);font-size:13px}
 .views figure{margin:0}
 .errors{background:color-mix(in srgb,var(--warn) 12%,var(--card));border:1px solid var(--warn);border-radius:8px;padding:8px 12px;margin-bottom:16px;font-size:13px}
 .empty{color:var(--muted);padding:40px 0;text-align:center}
-@media (max-width:820px){.layout{grid-template-columns:1fr}nav.toc{position:static;max-height:none}
-.views{grid-template-columns:1fr}}
+@media (max-width:820px){.views{grid-template-columns:1fr}
+header.bar{flex-wrap:wrap}header.bar h1{max-width:none;flex:1}header.bar .meta{display:none}
+.navs{order:9;flex:1 1 100%}.navs .dd{position:static;flex:1 1 0}.dd>summary{max-width:none}
+.dd .cur{flex:1 1 auto}
+.dd-panel{left:12px;width:auto;right:12px}}
 """
 
 JS = """
@@ -102,6 +122,76 @@ JS = """
     };
   }
   if (window.EventSource) connect();
+
+  // ---- the View / Sheet dropdowns of the top bar ----
+  const header = document.querySelector('header');
+  const dds = Array.from(document.querySelectorAll('details.dd'));
+  if (!dds.length) return;
+  function pad(){ document.documentElement.style.scrollPaddingTop = (header.offsetHeight + 8) + 'px'; }
+  pad(); window.addEventListener('resize', pad);
+  function closeAll(except){ dds.forEach(d => { if (d !== except) d.open = false; }); }
+  dds.forEach(dd => {
+    const filter = dd.querySelector('.dd-filter');
+    dd.addEventListener('toggle', () => {
+      if (!dd.open) return;
+      closeAll(dd);
+      const on = dd.querySelector('a.on');
+      if (on) on.scrollIntoView({block: 'nearest'});
+      if (filter && matchMedia('(pointer:fine)').matches) filter.focus();
+    });
+    dd.querySelectorAll('.dd-list a').forEach(a => a.addEventListener('click', () => {
+      dd.open = false; held = document.getElementById(a.getAttribute('href').slice(1)); show(a); }));
+    if (filter) filter.addEventListener('input', () => {
+      const q = filter.value.trim().toLowerCase();
+      const rows = Array.from(dd.querySelectorAll('.dd-list > *'));
+      let any = false;
+      rows.forEach(r => { if (r.tagName === 'A') {
+        const hit = !q || (r.dataset.folder + ' ' + r.textContent).toLowerCase().includes(q);
+        r.hidden = !hit; any = any || hit; } });
+      // A folder heading stays while something below it (deeper) is shown.
+      rows.forEach((r, i) => { if (r.tagName === 'A') return;
+        const d = +r.style.getPropertyValue('--d') || 0; let keep = false;
+        for (let j = i + 1; j < rows.length; j++) {
+          const rj = rows[j], dj = +rj.style.getPropertyValue('--d') || 0;
+          if (rj.tagName !== 'A' && dj <= d) break;
+          if (rj.tagName === 'A' && !rj.hidden) { keep = true; break; } }
+        r.hidden = !keep; });
+      dd.querySelector('.dd-empty').hidden = any;
+    });
+  });
+  document.addEventListener('click', (e) => { if (!e.target.closest('details.dd')) closeAll(null); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeAll(null); });
+
+  // Scroll spy: the sheet or view on screen is the current one of its dropdown.
+  function show(a){
+    const dd = a.closest('details.dd');
+    dd.querySelectorAll('a.on').forEach(x => x.classList.remove('on'));
+    a.classList.add('on');
+    const cur = dd.querySelector('.cur'); cur.textContent = '';
+    if (a.dataset.folder) { const p = document.createElement('span'); p.className = 'p';
+      p.textContent = a.dataset.folder + ' \\u203a '; cur.appendChild(p); }
+    cur.appendChild(document.createTextNode(a.textContent));
+    cur.title = (a.dataset.folder ? a.dataset.folder + ' \\u203a ' : '') + a.textContent;
+  }
+  const figs = Array.from(document.querySelectorAll('figure[id]'));
+  let last = null, queued = false, held = null;
+  function spy(){
+    queued = false;
+    const top = header.offsetHeight + 40;
+    // A picked entry stays current while it is on screen, even when the
+    // page cannot scroll it up to the top (the last ones).
+    if (held) { const r = held.getBoundingClientRect();
+      if (r.bottom > top && r.top < innerHeight) { last = held; return; } held = null; }
+    let cur = figs[0];
+    for (const f of figs) { if (f.getBoundingClientRect().top <= top) cur = f; else break; }
+    if (!cur || cur === last) return;
+    last = cur;
+    const a = document.querySelector('.dd-list a[href="#' + cur.id + '"]');
+    if (a) show(a);
+  }
+  window.addEventListener('scroll', () => { if (!queued) { queued = true; requestAnimationFrame(spy); } },
+                          {passive: true});
+  spy();
 })();
 """
 
@@ -109,11 +199,12 @@ JS = """
 LOGOUT = '<a class="btn" href="/logout">Log out</a>'
 
 
-def _page(title: str, header: str, body: str, slug: str | None = None) -> bytes:
+def _page(title: str, header: str, body: str, slug: str | None = None,
+          bar: bool = False) -> bytes:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{escape(title)}</title><style>{CSS}</style></head>
-<body data-slug="{escape(slug or '')}"><header>{header}<span class="spacer"></span>
+<body data-slug="{escape(slug or '')}"><header{' class="bar"' if bar else ''}>{header}{'' if bar else '<span class="spacer"></span>'}
 <span id="live" class="live"><i></i><span>connecting…</span></span>{LOGOUT if PASSWORD else ""}</header>
 <main>{body}</main><script>{JS}</script></body></html>""".encode("utf-8")
 
@@ -128,6 +219,60 @@ def _count(n: int, word: str) -> str:
 
 def _file_url(index: dict, file: str) -> str:
     return f"/files/{quote(index['slug'])}/{quote(index['rev'])}/{quote(file)}"
+
+
+SEP = " › "
+#: More entries than this and a dropdown gets a filter box.
+FILTER_FROM = 8
+
+
+def _folder(item: dict) -> list[str]:
+    """An entry's folder path, top first. Older renders stored "A/B"."""
+    f = item.get("folder")
+    if isinstance(f, list):
+        return [str(p) for p in f if str(p).strip()]
+    return [p for p in str(f or "").split("/") if p.strip()]
+
+
+def _dropdown(label: str, entries: list[tuple[str, str, list[str]]]) -> str:
+    """One dropdown of the top bar: ``entries`` are (anchor, name, folder
+    path) in document order, shown as a folder tree – in each folder its
+    subfolders first, then its entries, as IngeTrazo's explorers do; the
+    entries outside any folder come last, under "No folder"."""
+    if not entries:
+        return ""
+    tree: dict = {"sub": {}, "items": []}
+    for anchor, name, path in entries:
+        node = tree
+        for part in path:
+            node = node["sub"].setdefault(part, {"sub": {}, "items": []})
+        node["items"].append((anchor, name, path))
+    rows: list[str] = []
+
+    def item(anchor: str, name: str, path: list[str], depth: int) -> None:
+        rows.append(f'<a href="#{anchor}" style="--d:{depth}" '
+                    f'data-folder="{escape(SEP.join(path))}">{escape(name)}</a>')
+
+    def walk(node: dict, depth: int) -> None:
+        for name, sub in node["sub"].items():
+            rows.append(f'<div class="f" style="--d:{depth}">{escape(name)}</div>')
+            walk(sub, depth + 1)
+        if depth:
+            for e in node["items"]:
+                item(*e, depth)
+
+    walk(tree, 0)
+    if tree["items"]:
+        if tree["sub"]:
+            rows.append('<div class="f none" style="--d:0">No folder</div>')
+        for e in tree["items"]:
+            item(*e, 1 if tree["sub"] else 0)
+    filt = ('<input class="dd-filter" type="search" placeholder="Filter…" '
+            f'aria-label="Filter {escape(label.lower())}s">' if len(entries) > FILTER_FROM else "")
+    return (f'<details class="dd"><summary><span class="k">{escape(label)}</span>'
+            f'<span class="cur muted">{len(entries)}</span></summary>'
+            f'<div class="dd-panel">{filt}<div class="dd-list">{"".join(rows)}</div>'
+            '<div class="dd-empty" hidden>Nothing matches.</div></div></details>')
 
 
 def overview() -> bytes:
@@ -163,17 +308,13 @@ def model_page(slug: str) -> bytes | None:
             return _page(TITLE, f'<a class="btn" href="/">← All models</a>',
                          '<p class="empty">Rendering… this page refreshes when it is done.</p>', slug)
         return None
-    toc, sheets_html = [], []
-    folder = None
+    sheet_nav, view_nav, sheets_html = [], [], []
     for i, s in enumerate(idx.get("sheets", [])):
         anchor = f"sheet-{i}"
-        if s.get("folder") != folder:
-            folder = s.get("folder")
-            if folder:
-                toc.append(f'<div class="folder">{escape(folder)}</div>')
-        toc.append(f'<a href="#{anchor}">{escape(s["name"])}</a>')
+        path = _folder(s)
+        sheet_nav.append((anchor, s["name"], path))
         extra = "" if s.get("printed", True) else ' <span class="muted">(not printed)</span>'
-        where = f'<span class="muted">{escape(s["folder"])}</span>' if s.get("folder") else ""
+        where = f'<span class="muted">{escape(SEP.join(path))}</span>' if path else ""
         if s.get("file"):
             url = _file_url(idx, s["file"])
             img = f'<a class="img" href="{url}" target="_blank"><img src="{url}" alt="{escape(s["name"])}" loading="lazy"></a>'
@@ -182,17 +323,15 @@ def model_page(slug: str) -> bytes | None:
         sheets_html.append(f'<figure id="{anchor}">{img}<figcaption><strong>{escape(s["name"])}</strong>'
                            f'{extra}<span class="spacer"></span>{where}</figcaption></figure>')
     views_html = []
-    if idx.get("views"):
-        toc.append('<h3>Views</h3>')
     for i, v in enumerate(idx.get("views", [])):
         anchor = f"view-{i}"
-        toc.append(f'<a href="#{anchor}">{escape(v["name"])}</a>')
+        path = _folder(v)
+        view_nav.append((anchor, v["name"], path))
+        where = f'<span class="spacer"></span><span class="muted">{escape(SEP.join(path))}</span>' if path else ""
         url = _file_url(idx, v["file"])
         views_html.append(f'<figure id="{anchor}"><a class="img" href="{url}" target="_blank">'
                           f'<img src="{url}" alt="{escape(v["name"])}" loading="lazy"></a>'
-                          f'<figcaption><strong>{escape(v["name"])}</strong></figcaption></figure>')
-    if sheets_html:
-        toc.insert(0, '<h3>Sheets</h3>')
+                          f'<figcaption><strong>{escape(v["name"])}</strong>{where}</figcaption></figure>')
     errors = ""
     if idx.get("errors"):
         errors = ('<div class="errors"><strong>Some parts did not render:</strong><br>'
@@ -206,10 +345,12 @@ def model_page(slug: str) -> bytes | None:
         content += '<p class="empty">This model has no sheets and no saved views.</p>'
     pdf = (f'<a class="btn" href="{_file_url(idx, idx["pdf"])}" target="_blank">PDF</a>'
            if idx.get("pdf") else "")
-    header = (f'<a class="btn" href="/">← All</a><h1>{escape(idx["name"])}</h1>'
-              f'<span class="meta">rendered {_when(idx)}</span>{pdf}')
-    body = f'<div class="layout"><nav class="toc">{"".join(toc)}</nav><div>{content}</div></div>'
-    return _page(f'{idx["name"]} – {TITLE}', header, body, slug)
+    navs = _dropdown("View", view_nav) + _dropdown("Sheet", sheet_nav)
+    header = (f'<a class="btn" href="/" title="All models">←</a>'
+              f'<h1 title="{escape(idx["name"])}">{escape(idx["name"])}</h1>'
+              + (f'<nav class="navs">{navs}</nav>' if navs else "")
+              + f'<span class="spacer"></span><span class="meta">rendered {_when(idx)}</span>{pdf}')
+    return _page(f'{idx["name"]} – {TITLE}', header, content, slug, bar=True)
 
 
 COOKIE = "itz_viewer"
