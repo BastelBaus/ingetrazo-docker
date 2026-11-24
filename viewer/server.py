@@ -2,7 +2,8 @@
 """Read-only live viewer: every sheet and saved view of every model in the
 data folder, in the browser, refreshed when a model file changes.
 
-Routes: ``/`` overview, ``/m/<slug>`` one model, ``/files/<slug>/<rev>/<f>``
+Routes: ``/`` overview, ``/m/<slug>`` one model, one sheet or view at a time
+(``?sheet=N`` / ``?view=N``, 1-based), ``/files/<slug>/<rev>/<f>``
 rendered images and PDF, ``/events`` server-sent events (a render finished),
 ``/healthz`` (always open). Who may see the rest: ``VIEWER_AUTH_MODE``
 (see auth.py) — ``local`` (``/login``, ``/logout``, Basic auth for
@@ -87,11 +88,14 @@ figure a.img{display:block;background:var(--sheet)}
 figure img{display:block;width:100%;height:auto}
 figcaption{display:flex;gap:10px;align-items:baseline;padding:8px 12px;font-size:14px;border-top:1px solid var(--line)}
 figcaption .muted,.muted{color:var(--muted);font-size:13px}
-.views{display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(420px,1fr))}
-.views figure{margin:0}
+.step{display:flex;gap:4px;flex:none}.step .btn{padding:3px 10px;font-size:15px;line-height:1.2}
+.step .btn:hover{text-decoration:none;border-color:var(--accent)}
+figure.one{margin:0}
+/* The one sheet or view fits the window below the top bar (~48px) and its caption (~40px). */
+figure.one img{width:auto;max-width:100%;max-height:calc(100vh - 48px - 40px - 32px);margin:0 auto;object-fit:contain}
 .errors{background:color-mix(in srgb,var(--warn) 12%,var(--card));border:1px solid var(--warn);border-radius:8px;padding:8px 12px;margin-bottom:16px;font-size:13px}
 .empty{color:var(--muted);padding:40px 0;text-align:center}
-@media (max-width:820px){.views{grid-template-columns:1fr}
+@media (max-width:820px){figure.one img{max-height:none}
 header.bar{flex-wrap:wrap}header.bar h1{max-width:none;flex:1}header.bar .meta{display:none}
 .navs{order:9;flex:1 1 100%}.navs .dd{position:static;flex:1 1 0}.dd>summary{max-width:none}
 .dd .cur{flex:1 1 auto}
@@ -139,8 +143,6 @@ JS = """
       if (on) on.scrollIntoView({block: 'nearest'});
       if (filter && matchMedia('(pointer:fine)').matches) filter.focus();
     });
-    dd.querySelectorAll('.dd-list a').forEach(a => a.addEventListener('click', () => {
-      dd.open = false; held = document.getElementById(a.getAttribute('href').slice(1)); show(a); }));
     if (filter) filter.addEventListener('input', () => {
       const q = filter.value.trim().toLowerCase();
       const rows = Array.from(dd.querySelectorAll('.dd-list > *'));
@@ -160,38 +162,14 @@ JS = """
     });
   });
   document.addEventListener('click', (e) => { if (!e.target.closest('details.dd')) closeAll(null); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeAll(null); });
-
-  // Scroll spy: the sheet or view on screen is the current one of its dropdown.
-  function show(a){
-    const dd = a.closest('details.dd');
-    dd.querySelectorAll('a.on').forEach(x => x.classList.remove('on'));
-    a.classList.add('on');
-    const cur = dd.querySelector('.cur'); cur.textContent = '';
-    if (a.dataset.folder) { const p = document.createElement('span'); p.className = 'p';
-      p.textContent = a.dataset.folder + ' \\u203a '; cur.appendChild(p); }
-    cur.appendChild(document.createTextNode(a.textContent));
-    cur.title = (a.dataset.folder ? a.dataset.folder + ' \\u203a ' : '') + a.textContent;
-  }
-  const figs = Array.from(document.querySelectorAll('figure[id]'));
-  let last = null, queued = false, held = null;
-  function spy(){
-    queued = false;
-    const top = header.offsetHeight + 40;
-    // A picked entry stays current while it is on screen, even when the
-    // page cannot scroll it up to the top (the last ones).
-    if (held) { const r = held.getBoundingClientRect();
-      if (r.bottom > top && r.top < innerHeight) { last = held; return; } held = null; }
-    let cur = figs[0];
-    for (const f of figs) { if (f.getBoundingClientRect().top <= top) cur = f; else break; }
-    if (!cur || cur === last) return;
-    last = cur;
-    const a = document.querySelector('.dd-list a[href="#' + cur.id + '"]');
-    if (a) show(a);
-  }
-  window.addEventListener('scroll', () => { if (!queued) { queued = true; requestAnimationFrame(spy); } },
-                          {passive: true});
-  spy();
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { closeAll(null); return; }
+    // ← / → step to the previous / next sheet or view, unless typing.
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || dds.some(d => d.open)) return;
+    if (e.target.closest && e.target.closest('input,textarea,select,[contenteditable]')) return;
+    const a = document.getElementById(e.key === 'ArrowLeft' ? 'prev' : e.key === 'ArrowRight' ? 'next' : '');
+    if (a) { e.preventDefault(); location.href = a.href; }
+  });
 })();
 """
 
@@ -244,23 +222,27 @@ def _folder(item: dict) -> list[str]:
     return [p for p in str(f or "").split("/") if p.strip()]
 
 
-def _dropdown(label: str, entries: list[tuple[str, str, list[str]]]) -> str:
-    """One dropdown of the top bar: ``entries`` are (anchor, name, folder
+def _dropdown(label: str, entries: list[tuple[str, str, list[str]]],
+              current: str = "") -> str:
+    """One dropdown of the top bar: ``entries`` are (link, name, folder
     path) in document order, shown as a folder tree – in each folder its
     subfolders first, then its entries, as IngeTrazo's explorers do; the
-    entries outside any folder come last, under "No folder"."""
+    entries outside any folder come last, under "No folder". The entry
+    whose link is ``current`` is marked and named in the closed dropdown;
+    without one, it shows how many entries there are."""
     if not entries:
         return ""
     tree: dict = {"sub": {}, "items": []}
-    for anchor, name, path in entries:
+    for link, name, path in entries:
         node = tree
         for part in path:
             node = node["sub"].setdefault(part, {"sub": {}, "items": []})
-        node["items"].append((anchor, name, path))
+        node["items"].append((link, name, path))
     rows: list[str] = []
 
-    def item(anchor: str, name: str, path: list[str], depth: int) -> None:
-        rows.append(f'<a href="#{anchor}" style="--d:{depth}" '
+    def item(link: str, name: str, path: list[str], depth: int) -> None:
+        on = ' class="on" aria-current="page"' if link == current else ""
+        rows.append(f'<a href="{escape(link)}"{on} style="--d:{depth}" '
                     f'data-folder="{escape(SEP.join(path))}">{escape(name)}</a>')
 
     def walk(node: dict, depth: int) -> None:
@@ -279,8 +261,16 @@ def _dropdown(label: str, entries: list[tuple[str, str, list[str]]]) -> str:
             item(*e, 1 if tree["sub"] else 0)
     filt = ('<input class="dd-filter" type="search" placeholder="Filter…" '
             f'aria-label="Filter {escape(label.lower())}s">' if len(entries) > FILTER_FROM else "")
+    cur = f'<span class="cur muted">{len(entries)}</span>'
+    for link, name, path in entries:
+        if link == current:
+            where = escape(SEP.join(path) + SEP) if path else ""
+            cur = (f'<span class="cur" title="{where}{escape(name)}">'
+                   + (f'<span class="p">{where}</span>' if where else "")
+                   + f'{escape(name)}</span>')
+            break
     return (f'<details class="dd"><summary><span class="k">{escape(label)}</span>'
-            f'<span class="cur muted">{len(entries)}</span></summary>'
+            f'{cur}</summary>'
             f'<div class="dd-panel">{filt}<div class="dd-list">{"".join(rows)}</div>'
             '<div class="dd-empty" hidden>Nothing matches.</div></div></details>')
 
@@ -311,7 +301,21 @@ def overview(user: User | None = None) -> bytes:
     return _page(TITLE, f"<h1>{escape(TITLE)}</h1>", body, user=user)
 
 
-def model_page(slug: str, user: User | None = None) -> bytes | None:
+def _pick(query: dict, sheets: list, views: list) -> tuple[str, int]:
+    """The entry a model page shows: ``?sheet=N`` or ``?view=N`` (1-based,
+    as IngeTrazo counts). Without one, or with one that no longer exists
+    (the model changed), the first sheet, else the first view."""
+    for kind, items in (("sheet", sheets), ("view", views)):
+        raw = (query.get(kind) or [""])[0]
+        if raw.isdigit() and 1 <= int(raw) <= len(items):
+            return kind, int(raw) - 1
+    return ("sheet", 0) if sheets else ("view", 0)
+
+
+def model_page(slug: str, user: User | None = None,
+               query: dict | None = None) -> bytes | None:
+    """One model: the sheet or saved view picked in the top bar, one at a
+    time (``?sheet=N`` / ``?view=N``), with Prev/Next through all of them."""
     idx = renderer.index(slug)
     if idx is None:
         if any(m["slug"] == slug for m in renderer.models()):
@@ -319,49 +323,63 @@ def model_page(slug: str, user: User | None = None) -> bytes | None:
                          '<p class="empty">Rendering… this page refreshes when it is done.</p>',
                          slug, user=user)
         return None
-    sheet_nav, view_nav, sheets_html = [], [], []
-    for i, s in enumerate(idx.get("sheets", [])):
-        anchor = f"sheet-{i}"
-        path = _folder(s)
-        sheet_nav.append((anchor, s["name"], path))
-        extra = "" if s.get("printed", True) else ' <span class="muted">(not printed)</span>'
-        where = f'<span class="muted">{escape(SEP.join(path))}</span>' if path else ""
-        if s.get("file"):
-            url = _file_url(idx, s["file"])
-            img = f'<a class="img" href="{url}" target="_blank"><img src="{url}" alt="{escape(s["name"])}" loading="lazy"></a>'
-        else:
-            img = '<p class="empty">not rendered</p>'
-        sheets_html.append(f'<figure id="{anchor}">{img}<figcaption><strong>{escape(s["name"])}</strong>'
-                           f'{extra}<span class="spacer"></span>{where}</figcaption></figure>')
-    views_html = []
-    for i, v in enumerate(idx.get("views", [])):
-        anchor = f"view-{i}"
-        path = _folder(v)
-        view_nav.append((anchor, v["name"], path))
-        where = f'<span class="spacer"></span><span class="muted">{escape(SEP.join(path))}</span>' if path else ""
-        url = _file_url(idx, v["file"])
-        views_html.append(f'<figure id="{anchor}"><a class="img" href="{url}" target="_blank">'
-                          f'<img src="{url}" alt="{escape(v["name"])}" loading="lazy"></a>'
-                          f'<figcaption><strong>{escape(v["name"])}</strong>{where}</figcaption></figure>')
+    sheets, views = idx.get("sheets", []), idx.get("views", [])
+    kind, pos = _pick(query or {}, sheets, views)
+    # Every entry in the order Prev/Next walks: the sheets, then the views.
+    entries = ([("sheet", i, s) for i, s in enumerate(sheets)]
+               + [("view", i, v) for i, v in enumerate(views)])
+
+    def link(k: str, i: int) -> str:
+        return f"?{k}={i + 1}"
+
+    current = link(kind, pos)
+    sheet_nav = [(link("sheet", i), s["name"], _folder(s)) for i, s in enumerate(sheets)]
+    view_nav = [(link("view", i), v["name"], _folder(v)) for i, v in enumerate(views)]
+
     errors = ""
     if idx.get("errors"):
         errors = ('<div class="errors"><strong>Some parts did not render:</strong><br>'
                   + "<br>".join(escape(e) for e in idx["errors"]) + "</div>")
-    content = errors
-    if sheets_html:
-        content += f'<section><h2>Sheets</h2>{"".join(sheets_html)}</section>'
-    if views_html:
-        content += f'<section><h2>Views</h2><div class="views">{"".join(views_html)}</div></section>'
-    if not sheets_html and not views_html:
+    content, step, prefetch = errors, "", ""
+    if entries:
+        at = next(n for n, (k, i, _) in enumerate(entries) if (k, i) == (kind, pos))
+        item = entries[at][2]
+        path = _folder(item)
+        extra = ("" if kind == "view" or item.get("printed", True)
+                 else ' <span class="muted">(not printed)</span>')
+        where = f'<span class="muted">{escape(SEP.join(path))}</span>' if path else ""
+        count = len(sheets) if kind == "sheet" else len(views)
+        if item.get("file"):
+            url = _file_url(idx, item["file"])
+            img = (f'<a class="img" href="{url}" target="_blank" title="Open full size">'
+                   f'<img src="{url}" alt="{escape(item["name"])}"></a>')
+        else:
+            img = '<p class="empty">not rendered</p>'
+        content += (f'<figure class="one">{img}<figcaption><strong>{escape(item["name"])}</strong>'
+                    f'{extra}<span class="muted">{kind.capitalize()} {pos + 1} of {count}</span>'
+                    f'<span class="spacer"></span>{where}</figcaption></figure>')
+        if len(entries) > 1:
+            prev_k, prev_i, prev = entries[at - 1]
+            next_k, next_i, nxt = entries[(at + 1) % len(entries)]
+            step = (f'<span class="step"><a class="btn" id="prev" href="{link(prev_k, prev_i)}" '
+                    f'title="Previous: {escape(prev["name"])} (←)" aria-label="Previous">‹</a>'
+                    f'<a class="btn" id="next" href="{link(next_k, next_i)}" '
+                    f'title="Next: {escape(nxt["name"])} (→)" aria-label="Next">›</a></span>')
+            # The neighbours' images load in the background: stepping is instant.
+            prefetch = "".join(f'<link rel="prefetch" href="{_file_url(idx, e["file"])}">'
+                               for e in (prev, nxt) if e.get("file"))
+    elif idx.get("errors"):
+        content += '<p class="empty">Nothing could be rendered (see above).</p>'
+    else:
         content += '<p class="empty">This model has no sheets and no saved views.</p>'
     pdf = (f'<a class="btn" href="{_file_url(idx, idx["pdf"])}" target="_blank">PDF</a>'
            if idx.get("pdf") else "")
-    navs = _dropdown("View", view_nav) + _dropdown("Sheet", sheet_nav)
+    navs = _dropdown("View", view_nav, current) + _dropdown("Sheet", sheet_nav, current)
     header = (f'<a class="btn" href="/" title="All models">←</a>'
               f'<h1 title="{escape(idx["name"])}">{escape(idx["name"])}</h1>'
-              + (f'<nav class="navs">{navs}</nav>' if navs else "")
+              + (f'<nav class="navs">{navs}</nav>' if navs else "") + step
               + f'<span class="spacer"></span><span class="meta">rendered {_when(idx)}</span>{pdf}')
-    return _page(f'{idx["name"]} – {TITLE}', header, content, slug, bar=True, user=user)
+    return _page(f'{idx["name"]} – {TITLE}', header, prefetch + content, slug, bar=True, user=user)
 
 
 COOKIE = "itz_viewer"
@@ -586,7 +604,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, overview(user), html, nocache)
         if path.startswith("/m/"):
             slug = path[3:]
-            page = model_page(slug, user) if _SAFE.match(slug) else None
+            page = (model_page(slug, user, parse_qs(parts.query))
+                    if _SAFE.match(slug) else None)
             if page is None:
                 return self._send(404, b"no such model\n", "text/plain")
             return self._send(200, page, html, nocache)

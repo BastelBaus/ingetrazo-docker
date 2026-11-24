@@ -7,9 +7,10 @@ container**:
   query, render and save documents. The tools are IngeTrazo's own (`run_python`, `query_model`, `screenshot`,
   sheets, views, export, …), plus `list_documents` for the data folder.
 - **Live viewer (optional)**: a read-only web page with every **sheet** and every **saved view** of every model
-  in the data folder. It re-renders and refreshes the page by itself when a file changes. A slim top bar has a
-  **View** and a **Sheet** dropdown with the model's folders (nested too) and a filter; each shows the folder path
-  of the sheet or view on screen.
+  in the data folder. It re-renders and refreshes the page by itself when a file changes. A model page shows one
+  sheet or view at a time, fitted to the window. A slim top bar has a **View** and a **Sheet** dropdown with the
+  model's folders (nested too) and a filter, plus ‹ › buttons (or the ← → keys) to step through all of them. Each
+  sheet and view has its own link (`/m/<model>?sheet=2`, `?view=1`).
 - **Your models stay in a folder you mount**, e.g. `./data` on the host.
 
 IngeTrazo itself is not modified: the image builds it from a git ref on GitHub.
