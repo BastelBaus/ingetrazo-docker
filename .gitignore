@@ -2,5 +2,6 @@ data/
 cache/
 state/
 .env
+viewer/static/
 __pycache__/
 *.pyc

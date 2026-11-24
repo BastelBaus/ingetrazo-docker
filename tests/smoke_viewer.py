@@ -113,6 +113,26 @@ def main():
             assert f'href="?{kind}={n}" class="on"' in body, (kind, n)
     check("model page shows one sheet or view at a time", one_at_a_time)
 
+    def three_d():
+        page = model_page("arco.igz")
+        assert 'href="?3d=1"' in page, "no 3D button"
+        slug = re.search(r'data-slug="([^"]+)"', page).group(1)
+        status, _, body = get(f"/m/{slug}?3d=1", BASIC)
+        body = body.decode()
+        assert status == 200 and 'id="stage"' in body, status
+        glb = re.search(r'data-glb="([^"]+)"', body).group(1)
+        status, headers, data = get(glb, BASIC)
+        assert status == 200 and headers["Content-Type"] == "model/gltf-binary" \
+            and data[:4] == b"glTF", (status, headers.get("Content-Type"), data[:4])
+        for lib in ("three.module.min.js", "addons/loaders/GLTFLoader.js",
+                    "addons/controls/OrbitControls.js", "addons/utils/BufferGeometryUtils.js"):
+            status, headers, data = get("/static/three/" + lib, BASIC)
+            assert status == 200 and headers["Content-Type"].startswith("text/javascript") \
+                and data, (lib, status)
+        assert get("/static/three/three.module.min.js")[0] == 401, "library without login"
+        assert get("/static/three/../render.py", BASIC)[0] == 404
+    check("3D view: page, GLB and three.js", three_d)
+
     check("picks up the model saved over MCP", lambda: wait_for(
         lambda: model_page("smoke-saved.igz"), "smoke-saved.igz to render"))
     print("== viewer: ok")
