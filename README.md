@@ -10,7 +10,9 @@ container**:
   in the data folder. It re-renders and refreshes the page by itself when a file changes. A model page shows one
   sheet or view at a time, fitted to the window. A slim top bar has a **View** and a **Sheet** dropdown with the
   model's folders (nested too) and a filter, plus ‹ › buttons (or the ← → keys) to step through all of them. Each
-  sheet and view has its own link (`/m/<model>?sheet=2`, `?view=1`).
+  sheet and view has its own link (`/m/<model>?sheet=2`, `?view=1`). A **3D** button shows the model in 3D in the
+  browser (three.js): drag to turn it, right-drag to move, wheel to zoom, the edges as lines, and the saved views
+  as camera presets (`?3d=1`). Models whose 3D file is bigger than `VIEWER_GLB_MAX_MB` get no 3D view.
 - **Your models stay in a folder you mount**, e.g. `./data` on the host.
 
 IngeTrazo itself is not modified: the image builds it from a git ref on GitHub.
@@ -109,6 +111,7 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `VIEWER_AUTH_MODE` | `local` | Viewer login: `local`, `none`, `oidc` or `proxy` (see [Viewer login](#viewer-login)) |
 | `VIEWER_PASSWORD` | – | `local`: the password (user `VIEWER_USER`); login page for browsers, Basic auth for scripts |
 | `VIEWER_SHEET_DPI` | `120` | Sheet image resolution |
+| `VIEWER_GLB_MAX_MB` | `50` | 3D view: a model whose GLB is bigger gets no 3D view (it is still rendered as sheets and views); `0` turns the 3D view off |
 | `INGETRAZO_IMAGE` | `ghcr.io/bastelbaus/ingetrazo:latest` | Image to pull (or tag to build) |
 | `INGETRAZO_REPO` / `INGETRAZO_REF` | fork / pinned commit | Which IngeTrazo to build |
 
@@ -129,7 +132,8 @@ software (Mesa llvmpipe) inside an in-memory X server (Xvfb).
   `shutdown`. The container's lifetime belongs to Docker. If IngeTrazo exits, the container exits too and the
   restart policy brings it back.
 - **`viewer`**: a second, read-only IngeTrazo (data mounted read-only). It watches `/data/**/*.igz` and renders
-  each model's sheets as PNG, the sheets as one PDF, and each saved view as PNG into the cache. It serves them as
+  each model's sheets as PNG, the sheets as one PDF, each saved view as PNG and the model as GLB (glTF binary,
+  for the 3D view) into the cache. It serves them as
   web pages, and server-sent events reload an open page when a new render is ready.
 
 Health: `GET /healthz` on both ports, used by the image's `HEALTHCHECK`. For the MCP service it checks that the

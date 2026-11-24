@@ -2,7 +2,8 @@
 """Keeps a rendered copy of every model in the data folder.
 
 A read-only headless IngeTrazo (no --allow-save) renders, per model, every
-sheet (PNG), every saved view (PNG) and the sheet atlas (PDF) into
+sheet (PNG), every saved view (PNG), the sheet atlas (PDF) and the model in
+3D (GLB, with the saved views' cameras, for the browser's 3D view) into
 ``/cache/<slug>/r<rev>/`` and describes it in ``/cache/<slug>/index.json``.
 A model is rendered again when its modification time or size changes and
 has stayed put for a moment (a save in progress is not read half-written).
@@ -31,6 +32,14 @@ SHEET_DPI = int(os.environ.get("VIEWER_SHEET_DPI", 120))
 VIEW_W = int(os.environ.get("VIEWER_VIEW_WIDTH", 1600))
 VIEW_H = int(os.environ.get("VIEWER_VIEW_HEIGHT", 1000))
 WITH_PDF = os.environ.get("VIEWER_PDF", "1").strip().lower() not in ("0", "false", "no", "off")
+#: The 3D model (GLB) for the browser's 3D view: one bigger than this many
+#: MB is not offered (0 = no 3D view at all).
+GLB_MAX_MB = float(os.environ.get("VIEWER_GLB_MAX_MB", 50) or 0)
+
+
+#: Bumped when index.json gains something a page needs: a model rendered
+#: by an older viewer is rendered again, even though its file is unchanged.
+INDEX_FORMAT = 2
 
 
 def slug_of(model: Path) -> str:
@@ -75,6 +84,23 @@ def _itz_viewer_paths():
     print({_MARK!r} + json.dumps(out, ensure_ascii=False))
 _itz_viewer_paths()
 del _itz_viewer_paths
+"""
+
+#: Read-only: each saved view's camera (core.saved_views.SavedView, the
+#: orbit camera's own terms: target, distance, yaw, pitch, fov), for the
+#: 3D view's camera presets.
+_SCENE_CAMERAS = f"""
+def _itz_viewer_cameras():
+    import json
+    out = []
+    for v in scene.saved_views:
+        out.append({{"name": v.name, "target": [float(c) for c in v.target],
+                    "distance": float(v.distance), "yaw": float(v.yaw),
+                    "pitch": float(v.pitch), "fov": float(v.fov_deg),
+                    "perspective": bool(v.perspective)}})
+    print({_MARK!r} + json.dumps(out, ensure_ascii=False))
+_itz_viewer_cameras()
+del _itz_viewer_cameras
 """
 
 
@@ -133,7 +159,8 @@ class Renderer:
             except OSError:
                 continue
             index = self.index(slug)
-            if index and index.get("source_signature") == sig and not (
+            if index and index.get("source_signature") == sig \
+                    and index.get("format") == INDEX_FORMAT and not (
                     index.get("errors") and time.time() - index.get("rendered_ts", 0) > RETRY):
                 continue                             # up to date (failures retried)
             if time.time() - sig[0] / 1e9 < SETTLE:
@@ -162,14 +189,19 @@ class Renderer:
         rev = f"r{time.time_ns() // 1_000_000}"
         out = base / rev
         out.mkdir(parents=True, exist_ok=True)
-        index = {"name": name, "slug": slug, "rev": rev,
+        index = {"format": INDEX_FORMAT, "name": name, "slug": slug, "rev": rev,
                  "source_signature": sig, "rendered_at": _now(),
                  "rendered_ts": time.time(),
-                 "sheets": [], "views": [], "pdf": None, "errors": []}
+                 "sheets": [], "views": [], "pdf": None, "errors": [],
+                 "glb": None, "glb_note": None, "cameras": []}
         try:
             # The viewer never saves: whatever a render left changed goes.
             info = self._call("open_document", {"path": str(model),
                                                 "discard_changes": True})
+            # The 3D model first, while the document is as it was saved
+            # (rendering a saved view switches layers on and off).
+            if GLB_MAX_MB > 0:
+                self._render_glb(out, index)
             sheets = self._sheet_list(info)
             if sheets:
                 index["sheets"], index["errors"] = self._render_sheets(out, sheets)
@@ -205,9 +237,50 @@ class Renderer:
             if old.is_dir() and old.name != rev:
                 shutil.rmtree(old, ignore_errors=True)
         log(f"viewer: {name}: {len(index['sheets'])} sheets, "
-            f"{len(index['views'])} views in {index['render_seconds']}s"
+            f"{len(index['views'])} views"
+            + (f", 3D {index['glb_mb']} MB" if index.get("glb") else "")
+            + f" in {index['render_seconds']}s"
             + (f", {len(index['errors'])} problems" if index["errors"] else ""))
         self._notify({"slug": slug, "rev": rev})
+
+    def _render_glb(self, out: Path, index: dict) -> None:
+        """``model.glb`` for the 3D view, and the saved views' cameras. A
+        file over ``VIEWER_GLB_MAX_MB`` is deleted and noted, not counted as
+        an error: an error renders the model again every few minutes, and
+        that would not make it any smaller."""
+        glb = out / "model.glb"
+        try:
+            self._call("export_file", {"path": str(glb)})
+        except RuntimeError as exc:
+            index["errors"].append(f"3D model: {exc}")
+            glb.unlink(missing_ok=True)
+            return
+        size = glb.stat().st_size if glb.is_file() else 0
+        if not size:
+            index["errors"].append("3D model: nothing was written")
+            return
+        mb = size / 1_000_000
+        if mb > GLB_MAX_MB:
+            glb.unlink(missing_ok=True)
+            index["glb_note"] = (f"The 3D model is {mb:.1f} MB, more than the "
+                                 f"{GLB_MAX_MB:g} MB limit (VIEWER_GLB_MAX_MB).")
+            log(f"viewer: {index['name']}: 3D model left out ({mb:.1f} MB)")
+            return
+        index["glb"], index["glb_mb"] = glb.name, round(mb, 2)
+        index["cameras"] = self._view_cameras()
+
+    def _view_cameras(self) -> list[dict]:
+        """The saved views' cameras (read-only); none if they cannot be read."""
+        try:
+            reply = self._call("run_python", {"code": _SCENE_CAMERAS})
+            if not reply.get("error"):
+                for line in (reply.get("stdout") or "").splitlines():
+                    if line.startswith(_MARK):
+                        got = json.loads(line[len(_MARK):])
+                        return [c for c in got if isinstance(c, dict)]
+        except (RuntimeError, ValueError, AttributeError):
+            pass
+        return []
 
     def _sheet_list(self, info: dict) -> list[dict]:
         """Every sheet in document order, with its folder path (a list of

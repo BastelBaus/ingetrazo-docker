@@ -3,8 +3,9 @@
 data folder, in the browser, refreshed when a model file changes.
 
 Routes: ``/`` overview, ``/m/<slug>`` one model, one sheet or view at a time
-(``?sheet=N`` / ``?view=N``, 1-based), ``/files/<slug>/<rev>/<f>``
-rendered images and PDF, ``/events`` server-sent events (a render finished),
+(``?sheet=N`` / ``?view=N``, 1-based) or the model in 3D (``?3d=1``),
+``/files/<slug>/<rev>/<f>`` rendered images, PDF and GLB, ``/static/<f>``
+the 3D view's script library (three.js), ``/events`` server-sent events (a render finished),
 ``/healthz`` (always open). Who may see the rest: ``VIEWER_AUTH_MODE``
 (see auth.py) — ``local`` (``/login``, ``/logout``, Basic auth for
 scripts), ``none``, ``oidc`` (``/auth/login``, ``/auth/callback``) or
@@ -28,6 +29,7 @@ from mcp_http.appbridge import App, log
 
 from .auth import Auth, User
 from .render import CACHE_DIR, POLL, Renderer
+from .view3d import THREE_DIR, view3d
 
 renderer: Renderer
 auth: Auth
@@ -100,6 +102,8 @@ header.bar{flex-wrap:wrap}header.bar h1{max-width:none;flex:1}header.bar .meta{d
 .navs{order:9;flex:1 1 100%}.navs .dd{position:static;flex:1 1 0}.dd>summary{max-width:none}
 .dd .cur{flex:1 1 auto}
 .dd-panel{left:12px;width:auto;right:12px}}
+.btn.on{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,var(--card));font-weight:600}
+a.btn:hover{text-decoration:none;border-color:var(--accent)}
 .who{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:14em}
 @media (max-width:820px){.who{display:none}}
 """
@@ -290,7 +294,8 @@ def overview(user: User | None = None) -> bytes:
             status = "rendering…"
         elif idx:
             status = (f'{_count(len(idx.get("sheets", [])), "sheet")} · '
-                      f'{_count(len(idx.get("views", [])), "view")} · {_when(idx)}')
+                      f'{_count(len(idx.get("views", [])), "view")}'
+                      + (" · 3D" if idx.get("glb") else "") + f' · {_when(idx)}')
         else:
             status = "waiting"
         cards.append(f'<a class="card" href="/m/{quote(m["slug"])}"><div class="thumb">{img}</div>'
@@ -301,14 +306,20 @@ def overview(user: User | None = None) -> bytes:
     return _page(TITLE, f"<h1>{escape(TITLE)}</h1>", body, user=user)
 
 
-def _pick(query: dict, sheets: list, views: list) -> tuple[str, int]:
+def _pick(query: dict, sheets: list, views: list,
+          has_3d: bool = False) -> tuple[str, int]:
     """The entry a model page shows: ``?sheet=N`` or ``?view=N`` (1-based,
-    as IngeTrazo counts). Without one, or with one that no longer exists
-    (the model changed), the first sheet, else the first view."""
+    as IngeTrazo counts), or ``?3d=1`` the model in 3D. Without one, or
+    with one that no longer exists (the model changed), the first sheet,
+    else the first view, else the 3D view."""
+    if has_3d and (query.get("3d") or [""])[0] not in ("", "0"):
+        return "3d", 0
     for kind, items in (("sheet", sheets), ("view", views)):
         raw = (query.get(kind) or [""])[0]
         if raw.isdigit() and 1 <= int(raw) <= len(items):
             return kind, int(raw) - 1
+    if not sheets and not views and has_3d:
+        return "3d", 0
     return ("sheet", 0) if sheets else ("view", 0)
 
 
@@ -324,7 +335,8 @@ def model_page(slug: str, user: User | None = None,
                          slug, user=user)
         return None
     sheets, views = idx.get("sheets", []), idx.get("views", [])
-    kind, pos = _pick(query or {}, sheets, views)
+    has_3d = bool(idx.get("glb") or idx.get("glb_note"))
+    kind, pos = _pick(query or {}, sheets, views, has_3d)
     # Every entry in the order Prev/Next walks: the sheets, then the views.
     entries = ([("sheet", i, s) for i, s in enumerate(sheets)]
                + [("view", i, v) for i, v in enumerate(views)])
@@ -332,7 +344,7 @@ def model_page(slug: str, user: User | None = None,
     def link(k: str, i: int) -> str:
         return f"?{k}={i + 1}"
 
-    current = link(kind, pos)
+    current = "?3d=1" if kind == "3d" else link(kind, pos)
     sheet_nav = [(link("sheet", i), s["name"], _folder(s)) for i, s in enumerate(sheets)]
     view_nav = [(link("view", i), v["name"], _folder(v)) for i, v in enumerate(views)]
 
@@ -341,7 +353,9 @@ def model_page(slug: str, user: User | None = None,
         errors = ('<div class="errors"><strong>Some parts did not render:</strong><br>'
                   + "<br>".join(escape(e) for e in idx["errors"]) + "</div>")
     content, step, prefetch = errors, "", ""
-    if entries:
+    if kind == "3d":
+        content += view3d(idx, _file_url(idx, idx["glb"]) if idx.get("glb") else "")
+    elif entries:
         at = next(n for n, (k, i, _) in enumerate(entries) if (k, i) == (kind, pos))
         item = entries[at][2]
         path = _folder(item)
@@ -375,6 +389,10 @@ def model_page(slug: str, user: User | None = None,
     pdf = (f'<a class="btn" href="{_file_url(idx, idx["pdf"])}" target="_blank">PDF</a>'
            if idx.get("pdf") else "")
     navs = _dropdown("View", view_nav, current) + _dropdown("Sheet", sheet_nav, current)
+    if has_3d:
+        on = ' on" aria-current="page' if kind == "3d" else ""
+        navs += (f'<a class="btn{on}" href="?3d=1" title="The model in 3D: '
+                 'drag to turn it, wheel to zoom">3D</a>')
     header = (f'<a class="btn" href="/" title="All models">←</a>'
               f'<h1 title="{escape(idx["name"])}">{escape(idx["name"])}</h1>'
               + (f'<nav class="navs">{navs}</nav>' if navs else "") + step
@@ -430,7 +448,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "ingetrazo-viewer"
 
     def log_message(self, fmt, *args):
-        if not self.path.startswith(("/healthz", "/files/")):
+        if not self.path.startswith(("/healthz", "/files/", "/static/")):
             sys.stderr.write("[viewer] %s %s\n" % (self.address_string(), fmt % args))
 
     def _send(self, status: int, body: bytes, ctype: str, extra: dict | None = None):
@@ -611,6 +629,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, page, html, nocache)
         if path.startswith("/files/"):
             return self._file(path[7:])
+        if path.startswith("/static/three/"):
+            return self._static(path[len("/static/three/"):])
         if path == "/events":
             return self._events()
         return self._send(404, b"not found\n", "text/plain")
@@ -623,10 +643,23 @@ class Handler(BaseHTTPRequestHandler):
         if not f.is_file():
             return self._send(404, b"not found\n", "text/plain")
         ctype = {"png": "image/png", "pdf": "application/pdf",
-                 "svg": "image/svg+xml"}.get(f.suffix[1:].lower(), "application/octet-stream")
+                 "svg": "image/svg+xml", "glb": "model/gltf-binary"}.get(f.suffix[1:].lower(), "application/octet-stream")
         # A render's folder never changes: cache it for good.
         return self._send(200, f.read_bytes(), ctype,
                           {"Cache-Control": "private, max-age=31536000, immutable"})
+
+    def _static(self, rest: str):
+        """The 3D view's library (three.js, fetched at image build time)."""
+        parts = rest.split("/")
+        if not parts or not all(_SAFE.match(p) and p not in (".", "..") for p in parts):
+            return self._send(404, b"not found\n", "text/plain")
+        f = THREE_DIR.joinpath(*parts)
+        if not f.is_file():
+            return self._send(404, b"not found\n", "text/plain")
+        ctype = ("text/javascript; charset=utf-8" if f.suffix == ".js"
+                 else "text/plain; charset=utf-8")
+        return self._send(200, f.read_bytes(), ctype,
+                          {"Cache-Control": "private, max-age=86400"})
 
     def _events(self):
         self.send_response(200)

@@ -67,6 +67,7 @@ services:
       PROXY_LOGOUT_URL: ${PROXY_LOGOUT_URL:-}
       VIEWER_TITLE: ${VIEWER_TITLE:-IngeTrazo viewer}
       VIEWER_SHEET_DPI: ${VIEWER_SHEET_DPI:-120}
+      VIEWER_GLB_MAX_MB: ${VIEWER_GLB_MAX_MB:-50}
     volumes:
       - ${INGETRAZO_DATA_DIR:-./data}:/data:ro
       - viewer-cache:/cache
