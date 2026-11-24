@@ -48,7 +48,7 @@ LIST_DOCUMENTS = {
 
 app: App
 auth: Auth
-MAX_BUSY = float(os.environ.get("HEALTH_MAX_BUSY_SECONDS", 900))
+MAX_BUSY = float(os.environ.get("HEALTH_MAX_BUSY_SECONDS") or 900)
 
 
 def _text(result: object, is_error: bool = False) -> dict:

@@ -36,6 +36,9 @@ services:
       INGETRAZO_MODEL: ${INGETRAZO_MODEL:-}
       INGETRAZO_ALLOW_SAVE: ${INGETRAZO_ALLOW_SAVE:-true}
       INGETRAZO_SAVE_FORMAT: ${INGETRAZO_SAVE_FORMAT:-}
+      INGETRAZO_AI_TIMEOUT: ${INGETRAZO_AI_TIMEOUT:-}
+      HEALTH_MAX_BUSY_SECONDS: ${HEALTH_MAX_BUSY_SECONDS:-}
+      XVFB_SCREEN: ${XVFB_SCREEN:-}
     volumes:
       - ${INGETRAZO_DATA_DIR:-./data}:/data
       - mcp-state:/state
@@ -67,6 +70,8 @@ services:
       PROXY_LOGOUT_URL: ${PROXY_LOGOUT_URL:-}
       VIEWER_TITLE: ${VIEWER_TITLE:-IngeTrazo viewer}
       VIEWER_SHEET_DPI: ${VIEWER_SHEET_DPI:-120}
+      INGETRAZO_AI_TIMEOUT: ${INGETRAZO_AI_TIMEOUT:-}
+      XVFB_SCREEN: ${XVFB_SCREEN:-}
     volumes:
       - ${INGETRAZO_DATA_DIR:-./data}:/data:ro
       - viewer-cache:/cache

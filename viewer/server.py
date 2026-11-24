@@ -353,7 +353,9 @@ def model_page(slug: str, user: User | None = None) -> bytes | None:
     if views_html:
         content += f'<section><h2>Views</h2><div class="views">{"".join(views_html)}</div></section>'
     if not sheets_html and not views_html:
-        content += '<p class="empty">This model has no sheets and no saved views.</p>'
+        content += ('<p class="empty">Nothing could be rendered (see above).</p>'
+                    if idx.get("errors") else
+                    '<p class="empty">This model has no sheets and no saved views.</p>')
     pdf = (f'<a class="btn" href="{_file_url(idx, idx["pdf"])}" target="_blank">PDF</a>'
            if idx.get("pdf") else "")
     navs = _dropdown("View", view_nav) + _dropdown("Sheet", sheet_nav)

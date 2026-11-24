@@ -172,8 +172,12 @@ class Renderer:
                                                 "discard_changes": True})
             sheets = self._sheet_list(info)
             if sheets:
-                index["sheets"], index["errors"] = self._render_sheets(out, sheets)
-                if WITH_PDF:
+                try:
+                    index["sheets"], index["errors"] = self._render_sheets(out, sheets)
+                except RuntimeError as exc:          # e.g. the bridge timed out
+                    index["errors"].append(f"sheets: {exc}")
+                    log(f"viewer: {name}: sheets: {exc}")
+                if WITH_PDF and index["sheets"]:
                     try:
                         self._call("export_pdf", {
                             "path": str(out / "sheets.pdf"), "format": "pdf",
