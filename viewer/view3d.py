@@ -199,13 +199,10 @@ new GLTFLoader().load(stage.dataset.glb, (gltf) => {
 """
 
 
-def view3d(index: dict, glb_url: str) -> str:
-    """The 3D view of a model page: the stage, its controls and its script;
-    or why there is none (the model is over the size limit)."""
-    if not glb_url:
-        note = index.get("glb_note") or "There is no 3D model of this file."
-        return f'<p class="empty">{escape(note)}</p>'
-    cameras = index.get("cameras") or []
+def view3d(glb_url: str, cameras: list, mb: float | None = None) -> str:
+    """The 3D view of a model page: the stage, its controls and its script,
+    for the model's GLB at ``glb_url`` (``mb`` big) and its saved views'
+    ``cameras``."""
     options = "".join(f'<option value="{i}">{escape(c.get("name", ""))}</option>'
                       for i, c in enumerate(cameras))
     pick = ('<select id="cam" aria-label="Camera"><option value="">Whole model</option>'
@@ -214,7 +211,6 @@ def view3d(index: dict, glb_url: str) -> str:
     importmap = json.dumps({"imports": {
         "three": "/static/three/three.module.min.js",
         "three/addons/": "/static/three/addons/"}})
-    mb = index.get("glb_mb")
     return (f'<style>{CSS}</style>'
             f'<figure class="one stage" id="stage" data-glb="{escape(glb_url)}" '
             f'data-cameras="{escape(json.dumps(cameras))}">'

@@ -55,18 +55,20 @@ def wait_for(pred, what, timeout=240):
     raise SystemExit(f"viewer: timed out waiting for {what}")
 
 
-def model_page(name):
+def model_page(name, query=""):
+    """The model's page once what it shows is rendered (the viewer renders
+    it when the page asks for it)."""
     status, _, body = get("/", BASIC)
     if status != 200:
         return None
     html = body.decode()
-    m = re.search(r'href="(/m/[^"]+)"><div class="thumb">.*?class="name">'
+    m = re.search(r'href="(/m/[^"]+)"><div class="thumb">(?:(?!</a>).)*class="name">'
                   + re.escape(name) + "<", html, re.S)
     if not m:
         return None
-    status, _, page = get(m.group(1), BASIC)
+    status, _, page = get(m.group(1) + query, BASIC)
     page = page.decode()
-    return page if status == 200 and "/files/" in page else None
+    return page if status == 200 and 'data-wait=""' in page else None
 
 
 def main():
@@ -90,15 +92,32 @@ def main():
         assert status == 200, status
     check("login page, cookie, basic auth, safe redirect", auth)
 
-    def rendered():
-        page = wait_for(lambda: model_page("arco.igz"), "arco.igz to render")
-        files = re.findall(r'/files/[^"]+\.(?:png|pdf)', page)
-        assert any(f.endswith(".pdf") for f in files), files
-        png = next(f for f in files if f.endswith(".png"))
+    def preview():
+        def thumb():
+            status, _, body = get("/", BASIC)
+            m = re.search(r'<img src="(/files/[^"]+preview[^"]+\.png)"', body.decode())
+            return m and m.group(1)
+        png = wait_for(thumb, "the preview of arco.igz (VIEWER_PRERENDER=previews)")
         status, headers, body = get(png, BASIC)
         assert status == 200 and headers["Content-Type"] == "image/png" \
             and body.startswith(b"\x89PNG"), status
-    check("arco.igz: sheets, views and PDF rendered", rendered)
+    check("overview: a preview per model", preview)
+
+    def rendered():
+        page = wait_for(lambda: model_page("arco.igz"), "arco.igz's first sheet to render")
+        png = re.search(r'<img src="(/files/[^"]+\.png)"', page).group(1)
+        status, headers, body = get(png, BASIC)
+        assert status == 200 and headers["Content-Type"] == "image/png" \
+            and body.startswith(b"\x89PNG"), status
+        slug = re.search(r'data-slug="([^"]+)"', page).group(1)
+
+        def pdf():
+            status, headers, _ = get(f"/m/{slug}?pdf=1", BASIC)
+            return headers.get("Location") if status == 303 else None
+        url = wait_for(pdf, "the PDF")
+        status, headers, body = get(url, BASIC)
+        assert status == 200 and body.startswith(b"%PDF"), status
+    check("arco.igz: a sheet rendered on demand, the PDF on request", rendered)
 
     def one_at_a_time():
         page = model_page("arco.igz")
@@ -111,15 +130,16 @@ def main():
             body = body.decode()
             assert status == 200 and body.count("<figure") == 1, (kind, n, status)
             assert f'href="?{kind}={n}" class="on"' in body, (kind, n)
-    check("model page shows one sheet or view at a time", one_at_a_time)
+            wait_for(lambda: model_page("arco.igz", f"?{kind}={n}"),
+                     f"{kind} {n} to render")
+    check("model page shows one sheet or view at a time, rendered on demand", one_at_a_time)
 
     def three_d():
         page = model_page("arco.igz")
         assert 'href="?3d=1"' in page, "no 3D button"
         slug = re.search(r'data-slug="([^"]+)"', page).group(1)
-        status, _, body = get(f"/m/{slug}?3d=1", BASIC)
-        body = body.decode()
-        assert status == 200 and 'id="stage"' in body, status
+        body = wait_for(lambda: model_page("arco.igz", "?3d=1"), "the 3D model")
+        assert 'id="stage"' in body
         glb = re.search(r'data-glb="([^"]+)"', body).group(1)
         status, headers, data = get(glb, BASIC)
         assert status == 200 and headers["Content-Type"] == "model/gltf-binary" \
@@ -135,6 +155,8 @@ def main():
 
     check("picks up the model saved over MCP", lambda: wait_for(
         lambda: model_page("smoke-saved.igz"), "smoke-saved.igz to render"))
+    assert get("/files/../etc/passwd", BASIC)[0] == 404
+    assert get("/files/x/../passwd", BASIC)[0] == 404
     print("== viewer: ok")
 
 

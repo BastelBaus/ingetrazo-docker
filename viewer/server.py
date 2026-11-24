@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Read-only live viewer: every sheet and saved view of every model in the
-data folder, in the browser, refreshed when a model file changes.
+"""Read-only live viewer: the sheets and saved views of the models in the
+model folders, in the browser, rendered when someone looks at them
+(render.py) and refreshed when a model file changes.
 
-Routes: ``/`` overview, ``/m/<slug>`` one model, one sheet or view at a time
-(``?sheet=N`` / ``?view=N``, 1-based) or the model in 3D (``?3d=1``),
+Routes: ``/`` overview (folder by folder, a preview per model), ``/m/<slug>``
+one model, one sheet or view at a time (``?sheet=N`` / ``?view=N``,
+1-based), the model in 3D (``?3d=1``) or its sheets as PDF (``?pdf=1``),
 ``/files/<slug>/<rev>/<f>`` rendered images, PDF and GLB, ``/static/<f>``
-the 3D view's script library (three.js), ``/events`` server-sent events (a render finished),
+the 3D view's script library (three.js), ``/events`` server-sent events
+(a listing or render started or finished),
 ``/healthz`` (always open). Who may see the rest: ``VIEWER_AUTH_MODE``
 (see auth.py) — ``local`` (``/login``, ``/logout``, Basic auth for
 scripts), ``none``, ``oidc`` (``/auth/login``, ``/auth/callback``) or
@@ -25,10 +28,12 @@ from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
+from mcp_http import folders
 from mcp_http.appbridge import App, log
 
 from .auth import Auth, User
-from .render import CACHE_DIR, POLL, Renderer
+from .render import (CACHE_DIR, GLB_MAX_MB, NEXT, NOW, POLL, PRERENDER, PREVIEW,
+                     WITH_PDF, Renderer)
 from .view3d import THREE_DIR, view3d
 
 renderer: Renderer
@@ -106,27 +111,47 @@ header.bar{flex-wrap:wrap}header.bar h1{max-width:none;flex:1}header.bar .meta{d
 a.btn:hover{text-decoration:none;border-color:var(--accent)}
 .who{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:14em}
 @media (max-width:820px){.who{display:none}}
+.pending{display:flex;align-items:center;justify-content:center;min-height:min(60vh,520px);background:var(--sheet);color:#6b6b66}
+.pending span::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px;
+background:var(--warn);animation:pulse 1s infinite}
+section.folder{margin-bottom:28px}
+.tag{font-size:11px;letter-spacing:.04em;border:1px solid var(--line);border-radius:4px;padding:1px 5px;vertical-align:middle}
 """
 
 JS = """
 (function(){
   const slug = document.body.dataset.slug || null;
+  // What this page waits for: a listing ("list"), "preview", "sheet:N", …
+  const wait = (document.body.dataset.wait || '').split(' ').filter(Boolean);
   const dot = document.getElementById('live');
   const key = 'scroll:' + location.pathname;
   try { const y = sessionStorage.getItem(key); if (y !== null) { sessionStorage.removeItem(key);
         window.scrollTo(0, parseInt(y, 10)); } } catch (e) {}
   function set(state, text){ if (!dot) return; dot.className = 'live ' + state;
                              dot.querySelector('span').textContent = text; }
+  function reload(){
+    try { sessionStorage.setItem(key, String(window.scrollY)); } catch (e) {}
+    location.reload();
+  }
   function connect(){
     const es = new EventSource('/events');
     es.onopen = () => set('on', 'live');
     es.onerror = () => set('', 'reconnecting…');
     es.onmessage = (m) => {
       let ev; try { ev = JSON.parse(m.data); } catch (e) { return; }
-      if (slug && ev.slug !== slug) return;
-      if (ev.rendering) { set('busy', 'updating…'); return; }
-      try { sessionStorage.setItem(key, String(window.scrollY)); } catch (e) {}
-      location.reload();
+      if (ev.kind === 'idle') { set('on', 'live'); return; }
+      if (ev.kind === 'rendering') {
+        if (!slug || ev.slug === slug) set('busy', 'rendering…');
+        return;
+      }
+      if (slug) {
+        // A model page: its model changed, or what it waits for is done.
+        if (ev.slug === slug && (ev.kind === 'listed' || ev.kind === 'removed'
+            || (ev.kind === 'done' && wait.includes(ev.item)))) reload();
+      } else if (ev.kind === 'models' || ev.kind === 'removed' || ev.kind === 'listed'
+                 || (ev.kind === 'done' && wait.includes(ev.item))) {
+        reload();                    // the overview
+      }
     };
   }
   if (window.EventSource) connect();
@@ -192,25 +217,27 @@ def _account(user: User | None) -> str:
 
 
 def _page(title: str, header: str, body: str, slug: str | None = None,
-          bar: bool = False, user: User | None = None) -> bytes:
+          bar: bool = False, user: User | None = None,
+          wait: list[str] | None = None) -> bytes:
+    """``wait``: the items whose render reloads the page when it is done."""
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{escape(title)}</title><style>{CSS}</style></head>
-<body data-slug="{escape(slug or '')}"><header{' class="bar"' if bar else ''}>{header}{'' if bar else '<span class="spacer"></span>'}
+<body data-slug="{escape(slug or '')}" data-wait="{escape(' '.join(wait or []))}"><header{' class="bar"' if bar else ''}>{header}{'' if bar else '<span class="spacer"></span>'}
 <span id="live" class="live"><i></i><span>connecting…</span></span>{_account(user)}</header>
 <main>{body}</main><script>{JS}</script></body></html>""".encode("utf-8")
 
 
 def _when(index: dict) -> str:
-    return escape((index.get("rendered_at") or "").replace("T", " ").replace("+00:00", " UTC"))
+    return escape((index.get("listed_at") or "").replace("T", " ").replace("+00:00", " UTC"))
 
 
 def _count(n: int, word: str) -> str:
     return f"{n} {word}" + ("" if n == 1 else "s")
 
 
-def _file_url(index: dict, file: str) -> str:
-    return f"/files/{quote(index['slug'])}/{quote(index['rev'])}/{quote(file)}"
+def _file_url(slug: str, rev: str, file: str) -> str:
+    return f"/files/{quote(slug)}/{quote(rev)}/{quote(file)}"
 
 
 SEP = " › "
@@ -279,31 +306,67 @@ def _dropdown(label: str, entries: list[tuple[str, str, list[str]]],
             '<div class="dd-empty" hidden>Nothing matches.</div></div></details>')
 
 
+def _pending(text: str) -> str:
+    return f'<div class="pending"><span>{escape(text)}</span></div>'
+
+
+def _problems(lines: list, title: str = "Some parts did not render:") -> str:
+    lines = [str(x) for x in lines if x]
+    if not lines:
+        return ""
+    return (f'<div class="errors"><strong>{escape(title)}</strong><br>'
+            + "<br>".join(escape(x) for x in lines) + "</div>")
+
+
 def overview(user: User | None = None) -> bytes:
-    cards = []
+    """Every model, folder by folder, each with a small preview. A model
+    without a current preview gets one rendered (``PREVIEW`` priority)."""
+    groups: dict[str, list[str]] = {f.name: [] for f in folders.FOLDERS}
     for m in renderer.models():
-        idx = m["index"]
+        idx, slug = m["index"], m["slug"]
+        if not m["fresh"] or renderer.due(idx, "preview"):
+            renderer.request(slug, "preview", PREVIEW)
         thumb = ""
-        if idx.get("sheets") and idx["sheets"][0].get("file"):
-            thumb = _file_url(idx, idx["sheets"][0]["file"])
-        elif idx.get("views"):
-            thumb = _file_url(idx, idx["views"][0]["file"])
-        img = (f'<img src="{thumb}" alt="" loading="lazy">' if thumb
-               else '<span class="muted">not rendered yet</span>')
+        st = renderer.state(idx, "preview")
+        old = (idx.get("prev") or {}).get("files", {}).get("preview")
+        if st.get("file"):
+            thumb = _file_url(slug, idx["rev"], st["file"])
+        elif old:
+            thumb = _file_url(slug, idx["prev"]["rev"], old)
+        if thumb:
+            img = f'<img src="{thumb}" alt="" loading="lazy">'
+        elif st.get("error") and not renderer.due(idx, "preview"):
+            img = '<span class="muted">no preview</span>'
+        else:
+            img = '<span class="muted">preview…</span>'
         if m["rendering"]:
             status = "rendering…"
+        elif idx.get("errors"):
+            status = "could not be opened"
         elif idx:
             status = (f'{_count(len(idx.get("sheets", [])), "sheet")} · '
-                      f'{_count(len(idx.get("views", [])), "view")}'
-                      + (" · 3D" if idx.get("glb") else "") + f' · {_when(idx)}')
+                      f'{_count(len(idx.get("views", [])), "view")} · {_when(idx)}')
         else:
-            status = "waiting"
-        cards.append(f'<a class="card" href="/m/{quote(m["slug"])}"><div class="thumb">{img}</div>'
-                     f'<div class="body"><div class="name">{escape(m["name"])}</div>'
-                     f'<div class="sub">{status}</div></div></a>')
-    body = (f'<div class="grid">{"".join(cards)}</div>' if cards else
-            '<p class="empty">No .igz files in the data folder yet.</p>')
-    return _page(TITLE, f"<h1>{escape(TITLE)}</h1>", body, user=user)
+            status = "not opened yet"
+        groups.setdefault(m["folder"], []).append(
+            f'<a class="card" href="/m/{quote(slug)}"><div class="thumb">{img}</div>'
+            f'<div class="body"><div class="name">{escape(m["rel"])}</div>'
+            f'<div class="sub">{status}</div></div></a>')
+    if not any(groups.values()):
+        body = '<p class="empty">No .igz files in the model folders yet.</p>'
+    elif len(folders.FOLDERS) == 1:
+        body = f'<div class="grid">{"".join(next(iter(groups.values())))}</div>'
+    else:
+        modes = {f.name: f.mode for f in folders.FOLDERS}
+        body = "".join(
+            f'<section class="folder"><h2>{escape(name)}'
+            + (' <span class="tag">read-only</span>' if modes.get(name) == "ro" else "")
+            + "</h2>"
+            + (f'<div class="grid">{"".join(cards)}</div>' if cards
+               else '<p class="muted">No models.</p>') + "</section>"
+            for name, cards in groups.items())
+    return _page(TITLE, f"<h1>{escape(TITLE)}</h1>", body, user=user,
+                 wait=["preview"])
 
 
 def _pick(query: dict, sheets: list, views: list,
@@ -323,19 +386,30 @@ def _pick(query: dict, sheets: list, views: list,
     return ("sheet", 0) if sheets else ("view", 0)
 
 
+def _opening(slug: str, user: User | None, text: str = "Opening the model…") -> bytes:
+    return _page(TITLE, '<a class="btn" href="/">← All models</a>',
+                 f'<p class="empty">{escape(text)} This page refreshes when it is done.</p>',
+                 slug, user=user, wait=["list"])
+
+
 def model_page(slug: str, user: User | None = None,
                query: dict | None = None) -> bytes | None:
     """One model: the sheet or saved view picked in the top bar, one at a
-    time (``?sheet=N`` / ``?view=N``), with Prev/Next through all of them."""
+    time (``?sheet=N`` / ``?view=N``), with Prev/Next through all of them.
+    What is on screen is rendered now if it was not yet, its neighbours
+    next; until then the page shows the model's last picture of it, if
+    there is one."""
+    if renderer.model(slug) is None:
+        return None
+    wait: list[str] = []
+    if not renderer.fresh(slug):
+        renderer.request(slug, "list", NOW)
+        wait.append("list")
     idx = renderer.index(slug)
     if idx is None:
-        if any(m["slug"] == slug for m in renderer.models()):
-            return _page(TITLE, f'<a class="btn" href="/">← All models</a>',
-                         '<p class="empty">Rendering… this page refreshes when it is done.</p>',
-                         slug, user=user)
-        return None
+        return _opening(slug, user)
     sheets, views = idx.get("sheets", []), idx.get("views", [])
-    has_3d = bool(idx.get("glb") or idx.get("glb_note"))
+    has_3d = GLB_MAX_MB > 0 and not idx.get("errors")
     kind, pos = _pick(query or {}, sheets, views, has_3d)
     # Every entry in the order Prev/Next walks: the sheets, then the views.
     entries = ([("sheet", i, s) for i, s in enumerate(sheets)]
@@ -348,27 +422,53 @@ def model_page(slug: str, user: User | None = None,
     sheet_nav = [(link("sheet", i), s["name"], _folder(s)) for i, s in enumerate(sheets)]
     view_nav = [(link("view", i), v["name"], _folder(v)) for i, v in enumerate(views)]
 
-    errors = ""
-    if idx.get("errors"):
-        errors = ('<div class="errors"><strong>Some parts did not render:</strong><br>'
-                  + "<br>".join(escape(e) for e in idx["errors"]) + "</div>")
-    content, step, prefetch = errors, "", ""
+    content = _problems(idx.get("errors") or [], "The model could not be opened:")
+    step = prefetch = ""
     if kind == "3d":
-        content += view3d(idx, _file_url(idx, idx["glb"]) if idx.get("glb") else "")
+        st = renderer.state(idx, "glb")
+        if st.get("file"):
+            content += view3d(_file_url(slug, idx["rev"], st["file"]),
+                              idx.get("cameras") or [], st.get("mb"))
+        elif st.get("note"):
+            content += f'<p class="empty">{escape(st["note"])}</p>'
+        elif renderer.due(idx, "glb"):
+            renderer.request(slug, "glb", NOW)
+            wait.append("glb")
+            content += _pending("Preparing the 3D model…")
+        else:
+            content += _problems([st.get("error")], "The 3D model could not be made:")
     elif entries:
         at = next(n for n, (k, i, _) in enumerate(entries) if (k, i) == (kind, pos))
         item = entries[at][2]
+        key = f"{kind}:{pos + 1}"
+        renderer.viewed(slug, key, item["name"])
+        st = renderer.state(idx, key)
         path = _folder(item)
         extra = ("" if kind == "view" or item.get("printed", True)
                  else ' <span class="muted">(not printed)</span>')
         where = f'<span class="muted">{escape(SEP.join(path))}</span>' if path else ""
         count = len(sheets) if kind == "sheet" else len(views)
-        if item.get("file"):
-            url = _file_url(idx, item["file"])
+        before = idx.get("prev") or {}
+        old = (before.get("files") or {}).get(f"{kind}:{item['name']}")
+        url = ""
+        if st.get("file"):
+            url = _file_url(slug, idx["rev"], st["file"])
+        else:
+            if old:
+                url = _file_url(slug, before["rev"], old)
+            if renderer.due(idx, key):
+                renderer.request(slug, key, NOW)
+                wait.append(key)
+                if old:
+                    extra += ' <span class="muted">(updating…)</span>'
+            elif st.get("error"):
+                content += _problems([st["error"]], f"This {kind} did not render:")
+        content += _problems(st.get("warnings") or [])
+        if url:
             img = (f'<a class="img" href="{url}" target="_blank" title="Open full size">'
                    f'<img src="{url}" alt="{escape(item["name"])}"></a>')
         else:
-            img = '<p class="empty">not rendered</p>'
+            img = _pending("Rendering…" if key in wait else "not rendered")
         content += (f'<figure class="one">{img}<figcaption><strong>{escape(item["name"])}</strong>'
                     f'{extra}<span class="muted">{kind.capitalize()} {pos + 1} of {count}</span>'
                     f'<span class="spacer"></span>{where}</figcaption></figure>')
@@ -379,15 +479,20 @@ def model_page(slug: str, user: User | None = None,
                     f'title="Previous: {escape(prev["name"])} (←)" aria-label="Previous">‹</a>'
                     f'<a class="btn" id="next" href="{link(next_k, next_i)}" '
                     f'title="Next: {escape(nxt["name"])} (→)" aria-label="Next">›</a></span>')
-            # The neighbours' images load in the background: stepping is instant.
-            prefetch = "".join(f'<link rel="prefetch" href="{_file_url(idx, e["file"])}">'
-                               for e in (prev, nxt) if e.get("file"))
-    elif idx.get("errors"):
-        content += '<p class="empty">Nothing could be rendered (see above).</p>'
-    else:
+            # The neighbours: rendered next, and loaded in the background
+            # once they are, so stepping is instant.
+            for k, i in ((prev_k, prev_i), (next_k, next_i)):
+                n_key = f"{k}:{i + 1}"
+                n_st = renderer.state(idx, n_key)
+                if n_st.get("file"):
+                    prefetch += (f'<link rel="prefetch" '
+                                 f'href="{_file_url(slug, idx["rev"], n_st["file"])}">')
+                elif renderer.due(idx, n_key):
+                    renderer.request(slug, n_key, NEXT)
+    elif not idx.get("errors"):
         content += '<p class="empty">This model has no sheets and no saved views.</p>'
-    pdf = (f'<a class="btn" href="{_file_url(idx, idx["pdf"])}" target="_blank">PDF</a>'
-           if idx.get("pdf") else "")
+    pdf = ('<a class="btn" href="?pdf=1" target="_blank" title="All sheets as one PDF">PDF</a>'
+           if WITH_PDF and sheets else "")
     navs = _dropdown("View", view_nav, current) + _dropdown("Sheet", sheet_nav, current)
     if has_3d:
         on = ' on" aria-current="page' if kind == "3d" else ""
@@ -396,8 +501,33 @@ def model_page(slug: str, user: User | None = None,
     header = (f'<a class="btn" href="/" title="All models">←</a>'
               f'<h1 title="{escape(idx["name"])}">{escape(idx["name"])}</h1>'
               + (f'<nav class="navs">{navs}</nav>' if navs else "") + step
-              + f'<span class="spacer"></span><span class="meta">rendered {_when(idx)}</span>{pdf}')
-    return _page(f'{idx["name"]} – {TITLE}', header, prefetch + content, slug, bar=True, user=user)
+              + f'<span class="spacer"></span><span class="meta">read {_when(idx)}</span>{pdf}')
+    return _page(f'{idx["name"]} – {TITLE}', header, prefetch + content, slug,
+                 bar=True, user=user, wait=wait)
+
+
+def pdf_page(slug: str, user: User | None = None) -> tuple[bytes | None, str]:
+    """``?pdf=1``: (a page, "") while the sheets' PDF is made, or (None,
+    its URL) when it is there."""
+    if not renderer.fresh(slug):
+        renderer.request(slug, "list", NOW)
+        return _opening(slug, user, "Reading the model before making the PDF…"), ""
+    idx = renderer.index(slug)
+    if idx is None:
+        return _opening(slug, user), ""
+    st = renderer.state(idx, "pdf")
+    if st.get("file"):
+        return None, _file_url(slug, idx["rev"], st["file"])
+    back = f'<a class="btn" href="/m/{quote(slug)}">← {escape(idx["name"])}</a>'
+    if not WITH_PDF or not idx.get("sheets"):
+        return _page(TITLE, back, '<p class="empty">There is no PDF of this model.</p>',
+                     slug, user=user), ""
+    if renderer.due(idx, "pdf"):
+        renderer.request(slug, "pdf", NOW)
+        return _page(TITLE, back, _pending("Making the PDF of all sheets…"),
+                     slug, user=user, wait=["pdf"]), ""
+    return _page(TITLE, back, _problems([st.get("error")], "The PDF could not be made:"),
+                 slug, user=user), ""
 
 
 COOKIE = "itz_viewer"
@@ -622,8 +752,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, overview(user), html, nocache)
         if path.startswith("/m/"):
             slug = path[3:]
-            page = (model_page(slug, user, parse_qs(parts.query))
-                    if _SAFE.match(slug) else None)
+            query = parse_qs(parts.query)
+            if not _SAFE.match(slug) or renderer.model(slug) is None:
+                return self._send(404, b"no such model\n", "text/plain")
+            if (query.get("pdf") or [""])[0] not in ("", "0"):
+                page, url = pdf_page(slug, user)
+                if page is None:
+                    return self._send(303, b"", "text/plain", {"Location": url})
+                return self._send(200, page, html, nocache)
+            page = model_page(slug, user, query)
             if page is None:
                 return self._send(404, b"no such model\n", "text/plain")
             return self._send(200, page, html, nocache)
@@ -637,7 +774,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _file(self, rest: str):
         parts = rest.split("/")
-        if len(parts) != 3 or not all(_SAFE.match(p) for p in parts):
+        if len(parts) != 3 or not all(_SAFE.match(p) and not p.startswith(".")
+                                      for p in parts):
             return self._send(404, b"not found\n", "text/plain")
         f = CACHE_DIR.joinpath(*parts)
         if not f.is_file():
@@ -678,10 +816,13 @@ class Handler(BaseHTTPRequestHandler):
             while True:
                 with cond:
                     cond.wait_for(lambda: renderer.generation != seen, timeout=15)
-                    gen, event = renderer.generation, dict(renderer.last_event)
-                if gen != seen:
-                    seen = gen
+                # Every event since the last one sent: a "done" may come
+                # right before an "idle".
+                events = renderer.events_since(seen)
+                for event in events:
                     self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
+                if events:
+                    seen = events[-1]["generation"]
                 else:
                     self.wfile.write(b": keepalive\n\n")
                 self.wfile.flush()
@@ -709,7 +850,9 @@ def main() -> None:
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, name="http", daemon=True).start()
-    log(f"viewer on :{port} (auth: {auth.describe()}); cache {CACHE_DIR}")
+    log(f"viewer on :{port} (auth: {auth.describe()}); cache {CACHE_DIR}; "
+        f"prerender {PRERENDER}; model folders: "
+        + "; ".join(f.describe() for f in folders.FOLDERS))
     app.start(None, allow_save=False)
     renderer.run()
 

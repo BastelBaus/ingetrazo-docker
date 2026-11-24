@@ -33,6 +33,11 @@ NONE_PORT="${SMOKE_NONE_PORT:-18081}"
 PROXY_PORT="${SMOKE_PROXY_PORT:-18082}"
 OIDC_VIEWER_PORT="${SMOKE_OIDC_VIEWER_PORT:-18083}"
 OIDC_PORT="${SMOKE_OIDC_PORT:-18084}"
+# Several model folders (MODEL_FOLDERS), MCP and viewer.
+mcp_folders="smoke-mcp-folders-$$"
+v_folders="smoke-viewer-folders-$$"
+FOLDERS_MCP_PORT="${SMOKE_FOLDERS_MCP_PORT:-18767}"
+FOLDERS_VIEWER_PORT="${SMOKE_FOLDERS_VIEWER_PORT:-18085}"
 
 # Docker Desktop on Windows (Git Bash) wants a Windows path for -v.
 host_path() { (cd "$1" && (pwd -W 2>/dev/null || pwd)); }
@@ -43,11 +48,12 @@ cleanup() {
     echo "---- logs: mcp ----";    docker logs "$mcp" 2>&1 | tail -60 || true
     echo "---- logs: viewer ----"; docker logs "$viewer" 2>&1 | tail -60 || true
     echo "---- logs: mcp (oauth) ----"; docker logs "$mcp_oauth" 2>&1 | tail -40 || true
-    for c in "$v_none" "$v_proxy" "$v_oidc" "$oidc"; do
+    for c in "$v_none" "$v_proxy" "$v_oidc" "$oidc" "$mcp_folders" "$v_folders"; do
       echo "---- logs: $c ----"; docker logs "$c" 2>&1 | tail -30 || true
     done
   fi
-  docker rm -f -v "$mcp" "$viewer" "$mcp_oauth" "$v_none" "$v_proxy" "$v_oidc" "$oidc" >/dev/null 2>&1 || true
+  docker rm -f -v "$mcp" "$viewer" "$mcp_oauth" "$v_none" "$v_proxy" "$v_oidc" "$oidc" \
+    "$mcp_folders" "$v_folders" >/dev/null 2>&1 || true
   docker network rm "$net" >/dev/null 2>&1 || true
   exit $status
 }
@@ -101,6 +107,31 @@ fi
 echo "$out" | grep -q "PUBLIC_URL must be https"
 echo "  ok"
 "$PY" "$TESTS/smoke_viewer.py" "http://127.0.0.1:$VIEWER_PORT" viewer "$PASSWORD"
+
+# Two model folders: work (rw) and library (ro, *.bak.igz not listed).
+mkdir -p "$WORK/folders/work" "$WORK/folders/library"
+chmod 777 "$WORK/folders/work" "$WORK/folders/library"
+cp "$WORK/data/arco.igz" "$WORK/folders/library/arco.igz"
+cp "$WORK/data/arco.igz" "$WORK/folders/library/arco.bak.igz"
+F_WORK="$(host_path "$WORK/folders/work")"
+F_LIB="$(host_path "$WORK/folders/library")"
+FOLDERS="work:rw; library:ro:exclude=*.bak.igz"
+docker run -d --name "$mcp_folders" -p "127.0.0.1:$FOLDERS_MCP_PORT:8765" \
+  -e MCP_AUTH=token -e MCP_TOKEN="$TOKEN" -e INGETRAZO_MODEL=library/arco.igz \
+  -e MODEL_FOLDERS="$FOLDERS" \
+  -v "$F_WORK:/data/work" -v "$F_LIB:/data/library:ro" "$IMAGE" mcp >/dev/null
+docker run -d --name "$v_folders" -p "127.0.0.1:$FOLDERS_VIEWER_PORT:8080" \
+  -e VIEWER_AUTH_MODE=none -e VIEWER_PRERENDER=none -e VIEWER_POLL_SECONDS=1 \
+  -e MODEL_FOLDERS="$FOLDERS" \
+  -v "$F_WORK:/data/work:ro" -v "$F_LIB:/data/library:ro" "$IMAGE" viewer >/dev/null
+"$PY" "$TESTS/smoke_folders.py" "http://127.0.0.1:$FOLDERS_MCP_PORT" "$TOKEN" \
+  "http://127.0.0.1:$FOLDERS_VIEWER_PORT"
+echo "== MODEL_FOLDERS with a mistake refuses to start"
+if out="$(docker run --rm -e MODEL_FOLDERS="a:rx" -e MCP_TOKEN="$TOKEN" "$IMAGE" mcp 2>&1)"; then
+  echo "it started"; exit 1
+fi
+echo "$out" | grep -q "MODEL_FOLDERS"
+echo "  ok"
 
 echo "== viewer, VIEWER_AUTH_MODE=local without a password"
 if out="$(docker run --rm "$IMAGE" viewer 2>&1)"; then

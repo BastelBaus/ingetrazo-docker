@@ -24,6 +24,9 @@ jobs:
       - name: Lint shell scripts
         run: shellcheck entrypoint.sh tests/smoke.sh
 
+      - name: Unit tests (model folders, render queue, viewer pages)
+        run: python3 -m unittest discover -s tests -p "test_*.py" -v
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Build image (amd64)
@@ -43,4 +46,6 @@ jobs:
       - name: Validate compose file
         env:
           MCP_TOKEN: ci-dummy-token-0123456789
-        run: docker compose --profile viewer config -q
+        run: |
+          docker compose --profile viewer config -q
+          docker compose -f compose.yaml -f compose.folders.example.yaml --profile viewer config -q
