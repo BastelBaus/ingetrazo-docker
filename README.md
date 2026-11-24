@@ -5,15 +5,17 @@ container**:
 
 - **MCP server over HTTP**: lets AI agents (Claude Code, Claude Desktop, claude.ai, Cursor, VS Code, …) model,
   query, render and save documents. The tools are IngeTrazo's own (`run_python`, `query_model`, `screenshot`,
-  sheets, views, export, …), plus `list_documents` for the data folder.
-- **Live viewer (optional)**: a read-only web page with every **sheet** and every **saved view** of every model
-  in the data folder. It re-renders and refreshes the page by itself when a file changes. A model page shows one
+  sheets, views, export, …), plus `list_documents` for the model folders.
+- **Live viewer (optional)**: a read-only web page with the **sheets** and **saved views** of every model in the
+  model folders. The overview shows a small preview per model, folder by folder. A sheet or view is rendered when
+  someone opens it, and kept until its file changes; the page refreshes by itself. A model page shows one
   sheet or view at a time, fitted to the window. A slim top bar has a **View** and a **Sheet** dropdown with the
   model's folders (nested too) and a filter, plus ‹ › buttons (or the ← → keys) to step through all of them. Each
   sheet and view has its own link (`/m/<model>?sheet=2`, `?view=1`). A **3D** button shows the model in 3D in the
   browser (three.js): drag to turn it, right-drag to move, wheel to zoom, the edges as lines, and the saved views
   as camera presets (`?3d=1`). Models whose 3D file is bigger than `VIEWER_GLB_MAX_MB` get no 3D view.
-- **Your models stay in a folder you mount**, e.g. `./data` on the host.
+- **Your models stay in folders you mount**: `./data` on the host, or several folders, each read-only or
+  read/write for the MCP service (see [Model folders](#model-folders)).
 
 IngeTrazo itself is not modified: the image builds it from a git ref on GitHub.
 
@@ -100,6 +102,8 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | Variable | Default | |
 |---|---|---|
 | `INGETRAZO_DATA_DIR` | `./data` | Host folder mounted at `/data` |
+| `MODEL_FOLDERS` | – | Several model folders under `/data`, each `rw` or `ro`, with scan options (see [Model folders](#model-folders)) |
+| `MODEL_SCAN_DEPTH` / `MODEL_EXCLUDE` | – | Defaults for every folder: how deep to look for models; globs to leave out |
 | `INGETRAZO_MODEL` | – | Document to open at start (relative to `/data`) |
 | `INGETRAZO_ALLOW_SAVE` | `true` | Allow `save_document` |
 | `INGETRAZO_SAVE_FORMAT` | – | `json` = plain-JSON `.igz`, diffable in git |
@@ -110,6 +114,7 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `OAUTH_REDIRECT_URIS` | claude.ai, claude.com, loopback | `oauth`: redirect URIs clients may register (comma-separated) |
 | `VIEWER_AUTH_MODE` | `local` | Viewer login: `local`, `none`, `oidc` or `proxy` (see [Viewer login](#viewer-login)) |
 | `VIEWER_PASSWORD` | – | `local`: the password (user `VIEWER_USER`); login page for browsers, Basic auth for scripts |
+| `VIEWER_PRERENDER` | `previews` | What the viewer renders before anyone looks: `previews`, `none` or `all` (see [Rendering on demand](#rendering-on-demand)) |
 | `VIEWER_SHEET_DPI` | `120` | Sheet image resolution |
 | `VIEWER_GLB_MAX_MB` | `50` | 3D view: a model whose GLB is bigger gets no 3D view (it is still rendered as sheets and views); `0` turns the 3D view off |
 | `INGETRAZO_IMAGE` | `ghcr.io/bastelbaus/ingetrazo:latest` | Image to pull (or tag to build) |
@@ -128,18 +133,80 @@ software (Mesa llvmpipe) inside an in-memory X server (Xvfb).
 
 - **`mcp`**: an HTTP front end. It forwards every MCP request to IngeTrazo's own handler
   (`scripts/ingetrazo_mcp.py` of the cloned app) and talks to the app's AI bridge on the container's loopback.
-  The container adds three things: `list_documents`, a check that keeps file paths inside `/data`, and hiding
-  `shutdown`. The container's lifetime belongs to Docker. If IngeTrazo exits, the container exits too and the
+  The container adds three things: `list_documents`, a check that keeps file paths inside the model folders
+  (and writes inside the read/write ones), and hiding `shutdown`. The container's lifetime belongs to Docker. If IngeTrazo exits, the container exits too and the
   restart policy brings it back.
-- **`viewer`**: a second, read-only IngeTrazo (data mounted read-only). It watches `/data/**/*.igz` and renders
-  each model's sheets as PNG, the sheets as one PDF, each saved view as PNG and the model as GLB (glTF binary,
-  for the 3D view) into the cache. It serves them as
-  web pages, and server-sent events reload an open page when a new render is ready.
+- **`viewer`**: a second, read-only IngeTrazo (data mounted read-only). It watches the model folders and renders
+  what is looked at: a sheet as PNG, a saved view as PNG, the sheets as one PDF, the model as GLB (glTF binary,
+  for the 3D view), into the cache. It serves them as web pages, and server-sent events reload an open page when
+  what it waits for is ready.
 
 Health: `GET /healthz` on both ports, used by the image's `HEALTHCHECK`. For the MCP service it checks that the
 IngeTrazo process is alive and that its bridge answers (`list_documents`). The check queues behind the MCP
 requests, because the bridge works one request at a time; during a long tool call it reports `busy`. `/healthz` of
 the viewer needs no login in any mode.
+
+## Model folders
+
+By default there is one model folder, `/data` (`INGETRAZO_DATA_DIR` on the host), read/write for the MCP service.
+For more, list them in `MODEL_FOLDERS`, separated by `;`:
+
+```sh
+MODEL_FOLDERS=projects:rw; archive:ro:depth=1:exclude=old*,*.bak.igz
+```
+
+Each entry is `name[:rw|ro][:depth=N][:exclude=glob,glob…]`:
+
+| Part | |
+|---|---|
+| `name` | The folder is mounted at `/data/<name>`. MCP clients use it as the path prefix (`projects/house.igz`); the viewer shows it as a heading. |
+| `rw` / `ro` | `rw` (default): the MCP service may save and export into it. `ro`: `save_document`, `export_*`, `render_sheet` and `screenshot` with a path there fail with a clear error, and so does `save_document` without a path while a document from there is open. The viewer is read-only everywhere. |
+| `depth=N` | How deep to look for models: `0` the folder itself only, `1` one level of subfolders, … Default: no limit, or `MODEL_SCAN_DEPTH`. |
+| `exclude=…` | Globs left out of the listing (plus `MODEL_EXCLUDE`). Without `/` a glob matches a file or folder name at any depth (`*.bak.igz`, `archive*`); with `/` it matches the path from the folder (`old/**`). Folders left out are not walked at all. An excluded file can still be opened by its path. |
+
+Files and folders starting with `.` are never listed. A mistake in `MODEL_FOLDERS` stops the service with a
+message that names it.
+
+The host folders are bind mounts, in a `compose.override.yaml` next to `compose.yaml`;
+[`compose.folders.example.yaml`](compose.folders.example.yaml) is one to copy. It mounts an empty volume at
+`/data` and each folder inside it, read-only for the viewer (and for `ro` folders in the MCP service too).
+
+`list_documents` lists the models folder by folder, with each folder's mode:
+
+```json
+{"open_documents": [...], "data_folder": "/data",
+ "folders": [{"name": "projects", "path": "/data/projects", "mode": "rw",
+              "documents": [{"path": "projects/house.igz", "size_bytes": 81234,
+                             "modified": "2026-11-24T10:12:00+00:00", "open": true}]},
+             {"name": "archive", "path": "/data/archive", "mode": "ro", "documents": [...]}]}
+```
+
+## Rendering on demand
+
+A large model can have dozens of sheets and well over a hundred saved views, and rendering in software (no GPU)
+takes a while. So the viewer renders what someone looks at, keeps it, and does the rest later or never:
+
+- **Overview**: one small preview per model, the first sheet or else the first saved view (`VIEWER_PREVIEW_DPI`,
+  `VIEWER_PREVIEW_WIDTH` × `VIEWER_PREVIEW_HEIGHT`).
+- **Model page**: the sheets and saved views are listed by name (this opens the model but renders nothing). The
+  one on screen is rendered when it is opened ("Rendering…"), its neighbours (‹ ›) right after.
+- **PDF** and **3D**: made when someone asks for them (the PDF button, the 3D button).
+- **A model file changes**: nothing is rendered again at once. The next look at the model lists it again and
+  renders what is opened; until then the page shows the previous picture, marked "updating…". The sheets and
+  views opened in the last `VIEWER_RECENT_MINUTES` (30) are rendered again first.
+- **One queue** does it all, most urgent first: what a user waits for, then the neighbours and recently viewed,
+  then previews, then (`all`) everything else.
+
+`VIEWER_PRERENDER` sets what is done before anyone looks:
+
+| Value | |
+|---|---|
+| `previews` (default) | List each model and render its preview in the background, so the overview is ready. |
+| `none` | Nothing in the background: previews when the overview is opened, the rest when it is looked at. |
+| `all` | Everything (sheets, views, PDF, 3D model) in the background, as the viewer did before; fine for a few small models. |
+
+Each picture is cached by the file's modification time and size, the item, and the render settings in its file
+name (`sheet-003-120dpi.png`), so changing `VIEWER_SHEET_DPI` renders anew instead of showing an old picture.
 
 ## Viewer login
 
@@ -212,8 +279,9 @@ anyone else who can reach it could send the header themselves. With nginx, use `
 - put TLS in front when you publish beyond localhost (a reverse proxy such as Caddy or Traefik);
 - the container runs as an unprivileged user, and only `/data`, `/cache` and `/state` are writable.
 
-The path check on `open_document`/`save_document`/exports keeps well-behaved agents inside `/data`. It is not a
-sandbox against `run_python`.
+The path check on `open_document`/`save_document`/imports/exports keeps well-behaved agents inside the model
+folders, and out of writing to the `ro` ones. It is not a sandbox against `run_python`: mount `ro` folders
+read-only (`:ro`) for the MCP service too, as the example does, so the file system enforces it as well.
 
 ## License
 

@@ -58,6 +58,11 @@ def tool(name, args=None, expect_error=False, with_id=True):
     return result
 
 
+def documents_of(listed):
+    """Every document of a list_documents reply, folder by folder."""
+    return [d for f in listed["folders"] for d in f["documents"]]
+
+
 def text(result):
     return "".join(c.get("text", "") for c in result["content"] if c["type"] == "text")
 
@@ -121,7 +126,8 @@ def main():
 
     def documents():
         listed = json.loads(text(tool("list_documents")))
-        assert any(d["path"] == "arco.igz" and d["open"] for d in listed["documents"]), listed
+        assert [(f["name"], f["mode"]) for f in listed["folders"]] == [("data", "rw")], listed
+        assert any(d["path"] == "arco.igz" and d["open"] for d in documents_of(listed)), listed
         assert listed["open_documents"][0]["path"] == "/data/arco.igz", listed
     check("list_documents", documents)
 
@@ -148,7 +154,7 @@ def main():
         r = tool("run_python", {"code": "box((50, 50, 0), (1, 1, 1), name='Smoke')"})
         assert "changed: True" in text(r), text(r)
         tool("save_document", {"path": "smoke-saved.igz"})
-        docs = json.loads(text(tool("list_documents")))["documents"]
+        docs = documents_of(json.loads(text(tool("list_documents"))))
         assert any(d["path"] == "smoke-saved.igz" and d["open"] for d in docs), docs
     check("run_python + save_document", build_and_save)
 

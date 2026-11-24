@@ -5,6 +5,9 @@
 #
 # Settings come from .env (copy .env.example). Models live in ./data
 # (or INGETRAZO_DATA_DIR); both services see the same folder.
+# Several model folders, each read-only or read/write: MODEL_FOLDERS in
+# .env and their bind mounts in compose.override.yaml (see
+# compose.folders.example.yaml and the README).
 
 x-image: &image
   image: ${INGETRAZO_IMAGE:-ghcr.io/bastelbaus/ingetrazo:latest}
@@ -34,6 +37,9 @@ services:
       OAUTH_ACCESS_TOKEN_SECONDS: ${OAUTH_ACCESS_TOKEN_SECONDS:-}
       OAUTH_REFRESH_TOKEN_DAYS: ${OAUTH_REFRESH_TOKEN_DAYS:-}
       INGETRAZO_MODEL: ${INGETRAZO_MODEL:-}
+      MODEL_FOLDERS: ${MODEL_FOLDERS:-}
+      MODEL_SCAN_DEPTH: ${MODEL_SCAN_DEPTH:-}
+      MODEL_EXCLUDE: ${MODEL_EXCLUDE:-}
       INGETRAZO_ALLOW_SAVE: ${INGETRAZO_ALLOW_SAVE:-true}
       INGETRAZO_SAVE_FORMAT: ${INGETRAZO_SAVE_FORMAT:-}
     volumes:
@@ -65,7 +71,11 @@ services:
       PROXY_GROUPS_HEADER: ${PROXY_GROUPS_HEADER:-}
       PROXY_ADMIN_GROUP: ${PROXY_ADMIN_GROUP:-}
       PROXY_LOGOUT_URL: ${PROXY_LOGOUT_URL:-}
+      MODEL_FOLDERS: ${MODEL_FOLDERS:-}
+      MODEL_SCAN_DEPTH: ${MODEL_SCAN_DEPTH:-}
+      MODEL_EXCLUDE: ${MODEL_EXCLUDE:-}
       VIEWER_TITLE: ${VIEWER_TITLE:-IngeTrazo viewer}
+      VIEWER_PRERENDER: ${VIEWER_PRERENDER:-previews}
       VIEWER_SHEET_DPI: ${VIEWER_SHEET_DPI:-120}
       VIEWER_GLB_MAX_MB: ${VIEWER_GLB_MAX_MB:-50}
     volumes:
