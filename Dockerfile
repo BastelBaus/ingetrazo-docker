@@ -52,6 +52,20 @@ RUN grep -viE '^\s*(pytest|truststore)' requirements.txt > /tmp/req.txt \
  && pip install -r /tmp/req.txt \
  && rm /tmp/req.txt
 
+# The viewer's 3D view runs three.js (MIT) in the browser: a pinned release,
+# checked against its SHA-256, served by the viewer itself (no CDN at view time).
+RUN set -e; \
+    base=https://cdn.jsdelivr.net/npm/three@0.170.0; \
+    dir=/opt/ingetrazo-docker/viewer/static/three; \
+    fetch() { mkdir -p "$(dirname "$dir/$2")"; \
+              curl -fsSL --retry 3 -o "$dir/$2" "$base/$1"; \
+              echo "$3  $dir/$2" | sha256sum -c --quiet -; }; \
+    fetch build/three.module.min.js three.module.min.js 08fd7545d13d2c7fb65ab691530a802dafefd638596501854f267d0fb13c39e7; \
+    fetch examples/jsm/loaders/GLTFLoader.js addons/loaders/GLTFLoader.js 45139faddd5aaf48ed2d62203d976e5cbd703db1a592de40527f9f6cf58abd44; \
+    fetch examples/jsm/controls/OrbitControls.js addons/controls/OrbitControls.js 80efaadea4f8a636a65fb0bd08bfef62f3d93a0bb94e2e7500f23176c5c07f4e; \
+    fetch examples/jsm/utils/BufferGeometryUtils.js addons/utils/BufferGeometryUtils.js c25b7930e570e9ec56173cd3b866ec8d2e10016630db3937efb439daf1cedbf6; \
+    fetch LICENSE LICENSE 4c40a1ef62450b857c3b2aaf294936304cd552d965fbcd9d32d4c5bcf4ba4454
+
 # This repo's services.
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY mcp_http/ /opt/ingetrazo-docker/mcp_http/
