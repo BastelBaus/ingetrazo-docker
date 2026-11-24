@@ -100,6 +100,19 @@ def main():
             and body.startswith(b"\x89PNG"), status
     check("arco.igz: sheets, views and PDF rendered", rendered)
 
+    def one_at_a_time():
+        page = model_page("arco.igz")
+        assert page.count("<figure") == 1, page.count("<figure")
+        links = re.findall(r'<a href="\?(sheet|view)=(\d+)"', page)
+        assert links, "no sheet/view links in the top bar"
+        slug = re.search(r'data-slug="([^"]+)"', page).group(1)
+        for kind, n in links:
+            status, _, body = get(f"/m/{slug}?{kind}={n}", BASIC)
+            body = body.decode()
+            assert status == 200 and body.count("<figure") == 1, (kind, n, status)
+            assert f'href="?{kind}={n}" class="on"' in body, (kind, n)
+    check("model page shows one sheet or view at a time", one_at_a_time)
+
     check("picks up the model saved over MCP", lambda: wait_for(
         lambda: model_page("smoke-saved.igz"), "smoke-saved.igz to render"))
     print("== viewer: ok")
