@@ -359,6 +359,21 @@ def _folder(item: dict) -> list[str]:
     return [p for p in str(f or "").split("/") if p.strip()]
 
 
+def _natural(text: str) -> list:
+    """A sort key: case-insensitive, numbers by value ("View 2" < "View 10")."""
+    return [(0, int(t), "") if t.isdigit() else (1, 0, t)
+            for t in re.split(r"(\d+)", text.casefold()) if t]
+
+
+def _by_name(items: list[tuple[int, dict]]) -> list[tuple[int, dict]]:
+    """Saved views (index, view) by folder, then name, alphabetically; the
+    views outside any folder after those in folders, as the dropdown shows
+    them. The index stays the document's (``?view=N``)."""
+    return sorted(items, key=lambda iv: (not _folder(iv[1]),
+                                          [_natural(p) for p in _folder(iv[1])],
+                                          _natural(str(iv[1].get("name", "")))))
+
+
 def _path_json(path: list[str]) -> str:
     """A folder path as the browser's JSON.stringify writes it (compared as
     text by the tree's script)."""
@@ -437,9 +452,11 @@ def _dropdown_3d(idx: dict, current: str, query: dict) -> str:
     paths = {v["name"]: _folder(v) for v in idx.get("views", [])}
     entries = [("?3d=1", "Whole model", [])]
     attrs = {"?3d=1": ' data-cam="0"'}
-    for i, c in enumerate(idx.get("cameras") or []):
+    cams = [(i, {"name": str(c.get("name", "")), "folder": paths.get(c.get("name"), [])})
+            for i, c in enumerate(idx.get("cameras") or [])]
+    for i, c in _by_name(cams):
         link = f"?3d=1&cam={i + 1}"
-        entries.append((link, str(c.get("name", "")), paths.get(c.get("name"), [])))
+        entries.append((link, c["name"], c["folder"]))
         attrs[link] = f' data-cam="{i + 1}"'
     if current:
         raw = (query.get("cam") or [""])[0]
@@ -572,16 +589,18 @@ def model_page(slug: str, user: User | None = None,
     sheets, views = idx.get("sheets", []), idx.get("views", [])
     has_3d = GLB_MAX_MB > 0 and not idx.get("errors")
     kind, pos = _pick(query or {}, sheets, views, has_3d)
-    # Every entry in the order Prev/Next walks: the sheets, then the views.
+    # Every entry in the order Prev/Next walks: the sheets in document
+    # order, then the views alphabetically.
+    sorted_views = _by_name(list(enumerate(views)))
     entries = ([("sheet", i, s) for i, s in enumerate(sheets)]
-               + [("view", i, v) for i, v in enumerate(views)])
+               + [("view", i, v) for i, v in sorted_views])
 
     def link(k: str, i: int) -> str:
         return f"?{k}={i + 1}"
 
     current = "?3d=1" if kind == "3d" else link(kind, pos)
     sheet_nav = [(link("sheet", i), s["name"], _folder(s)) for i, s in enumerate(sheets)]
-    view_nav = [(link("view", i), v["name"], _folder(v)) for i, v in enumerate(views)]
+    view_nav = [(link("view", i), v["name"], _folder(v)) for i, v in sorted_views]
 
     content = _problems(idx.get("errors") or [], "The model could not be opened:")
     step = prefetch = ""
@@ -1147,4 +1166,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Run the package's copy: admin.py imports viewer.server, and a second
+    # copy of this file (as __main__) would hold auth and renderer while
+    # viewer.server's stay unset (NameError on /admin and /account).
+    from viewer import server as _server
+    _server.main()
