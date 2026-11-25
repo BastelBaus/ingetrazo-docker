@@ -11,6 +11,7 @@ the 3D view's script library (three.js), ``/events`` server-sent events
 (a listing or render started or finished),
 ``/admin`` the user list (admins), ``/account`` one's own account,
 ``/avatar/<user>.svg`` a user's avatar,
+``/version`` the running build (JSON),
 ``/healthz`` (always open). Who may see the rest: ``VIEWER_AUTH_MODE``
 (see auth.py) — ``local`` (``/login``, ``/logout``, Basic auth for
 scripts), ``none``, ``oidc`` (``/auth/login``, ``/auth/callback``) or
@@ -35,7 +36,7 @@ from mcp_http import folders, shares
 from mcp_http.appbridge import App, log
 from mcp_http.users import UserError
 
-from . import admin, avatar
+from . import admin, avatar, version
 from .auth import Auth, User
 from .render import (CACHE_DIR, GLB_MAX_MB, NEXT, NOW, POLL, PRERENDER, PREVIEW,
                      WITH_PDF, Renderer)
@@ -115,6 +116,7 @@ figure a.img{display:block;background:var(--sheet)}
 figure img{display:block;width:100%;height:auto}
 figcaption{display:flex;gap:10px;align-items:baseline;padding:8px 12px;font-size:14px;border-top:1px solid var(--line)}
 figcaption .muted,.muted{color:var(--muted);font-size:13px}
+footer.ver{color:var(--muted);font-size:12px;text-align:center;padding:4px 16px 12px}
 .step{display:flex;gap:4px;flex:none}.step .btn{padding:3px 10px;font-size:15px;line-height:1.2}
 .step .btn:hover{text-decoration:none;border-color:var(--accent)}
 figure.one{margin:0}
@@ -329,7 +331,7 @@ def _page(title: str, header: str, body: str, slug: str | None = None,
 <title>{escape(title)}</title><style>{CSS}</style></head>
 <body data-slug="{escape(slug or '')}" data-wait="{escape(' '.join(wait or []))}"{_settings(user)}><header{' class="bar"' if bar else ''}>{header}{'' if bar else '<span class="spacer"></span>'}
 <span id="live" class="live"><i></i><span>connecting…</span></span>{_account(user)}</header>
-<main>{body}</main><script>{JS}</script></body></html>""".encode("utf-8")
+<main>{body}</main><footer class="ver">{escape(version.text())}</footer><script>{JS}</script></body></html>""".encode("utf-8")
 
 
 def _when(index: dict) -> str:
@@ -1050,6 +1052,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._static(path[len("/static/three/"):])
         if path == "/events":
             return self._events(user)
+        if path == "/version":
+            return self._send(200, (json.dumps(version.info()) + "\n").encode(),
+                              "application/json", nocache)
         return self._send(404, b"not found\n", "text/plain")
 
     def _file(self, rest: str):

@@ -125,6 +125,7 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `VIEWER_GLB_MAX_MB` | `50` | 3D view: a model whose GLB is bigger gets no 3D view (it is still rendered as sheets and views); `0` turns the 3D view off |
 | `INGETRAZO_IMAGE` | `ghcr.io/bastelbaus/ingetrazo:latest` | Image to pull (or tag to build) |
 | `INGETRAZO_REPO` / `INGETRAZO_REF` | fork / pinned commit | Which IngeTrazo to build |
+| `INGETRAZO_DOCKER_REF` | `dev` | This repo's tag or commit for a local build; shown in the viewer's footer and at `/version` |
 
 ## How it works
 

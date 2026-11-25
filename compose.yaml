@@ -16,6 +16,7 @@ x-image: &image
     args:
       INGETRAZO_REPO: ${INGETRAZO_REPO:-https://github.com/BastelBaus/ingetrazo}
       INGETRAZO_REF: ${INGETRAZO_REF:-187e43f9bc85a28b513f1d0b3f9c68a55dbf47a4}
+      INGETRAZO_DOCKER_REF: ${INGETRAZO_DOCKER_REF:-dev}
   restart: unless-stopped
   init: false            # tini is the image's entrypoint already
   shm_size: 256m

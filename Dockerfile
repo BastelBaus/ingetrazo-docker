@@ -75,6 +75,11 @@ RUN useradd --create-home --uid 1000 ingetrazo \
  && mkdir -p /data /cache /state /users \
  && chown ingetrazo:ingetrazo /data /cache /state /users
 
+# This repo's version (tag or commit), shown in the viewer's footer and at
+# /version. release.yml and compose.yaml pass it; a plain build says "dev".
+ARG INGETRAZO_DOCKER_REF=dev
+ENV INGETRAZO_DOCKER_VERSION=$INGETRAZO_DOCKER_REF
+
 ENV QT_QPA_PLATFORM=xcb \
     LIBGL_ALWAYS_SOFTWARE=1 \
     INGETRAZO_APP=/opt/ingetrazo \
