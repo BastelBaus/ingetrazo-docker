@@ -249,6 +249,37 @@ class PagesTest(Base):
         self.assertIn('id="stage"', html)
         self.assertIn("model.glb", html)
 
+    def test_dropdowns_view_3d_sheet(self):
+        self.r.request(self.slug, "list")
+        self.drain()
+        html = self.server.model_page(self.slug).decode()
+        kinds = [html.index(f'data-kind="{k}"') for k in ("view", "3d", "sheet")]
+        self.assertEqual(kinds, sorted(kinds))                 # View, 3D, Sheet
+        self.assertNotIn('id="cam"', html)                     # no picker below
+        self.assertIn('href="?3d=1&amp;cam=2"', html)          # a saved view's camera
+        self.assertIn('data-cam="2"', html)
+        # The cameras sit in their saved views' folders.
+        self.assertIn('data-p="[&quot;Outside&quot;]"', html)
+        self.assertIn('class="dd-mode"', html)                 # list / tree switch
+        self.assertIn('data-nav="list"', html)
+
+    def test_3d_dropdown_marks_the_camera(self):
+        self.r.request(self.slug, "list")
+        self.drain()
+        html = self.server.model_page(self.slug, query={"3d": ["1"], "cam": ["3"]}).decode()
+        self.assertIn('href="?3d=1&amp;cam=3" class="on"', html)
+        html = self.server.model_page(self.slug, query={"3d": ["1"], "cam": ["99"]}).decode()
+        self.assertIn('href="?3d=1" class="on"', html)       # unknown: the whole model
+
+    def test_dropdown_rows_know_their_folder(self):
+        html = self.server._dropdown("Sheet", [("?sheet=1", "Plan", []),
+                                               ("?sheet=2", "Cut", ["A", "Ä B"])], "?sheet=2")
+        self.assertIn('data-in="[&quot;A&quot;,&quot;Ä B&quot;]"', html)
+        self.assertIn('data-p="[&quot;A&quot;]"', html)
+        self.assertIn('data-p="[&quot;A&quot;,&quot;Ä B&quot;]"', html)
+        flat = self.server._dropdown("Sheet", [("?sheet=1", "Plan", [])])
+        self.assertNotIn("dd-mode", flat)                       # no folders: no switch
+
 
 if __name__ == "__main__":
     unittest.main()
