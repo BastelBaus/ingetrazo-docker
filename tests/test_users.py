@@ -228,6 +228,39 @@ class ViewerLoginTest(unittest.TestCase):
         self.assertIn("switched off", page)
         self.assertEqual(self.req("/login", {"user": "anna", "password": "anna-pass"})[0], 401)
 
+    def test_shares_page_with_patterns(self):
+        boss = self.login("boss", "boss-password")
+        token = self.csrf(self.req("/admin", cookie=boss)[2])
+        self.req("/admin", {"action": "create", "name": "anna", "password": "anna-pass",
+                            "role": "user", "csrf": token}, boss)
+        status, _, page = self.req("/admin/shares?name=anna", cookie=boss)
+        self.assertEqual(status, 200)
+        self.assertIn("How folder access works", page)        # the help
+        self.assertIn('name="rules"', page)
+        self.assertIn('title="Hide it:', page)                 # tooltips on the choices
+        # New lines with a pattern; one bad line refuses the whole save.
+        status, _, page = self.req("/admin", {
+            "action": "shares", "name": "anna", "csrf": token, "s:*": "r",
+            "rules": "projects/a:rw\n**/private:none\nx:write"}, boss)
+        self.assertEqual(status, 400)
+        self.assertIn("In the new lines", page)
+        status, _, page = self.req("/admin", {
+            "action": "shares", "name": "anna", "csrf": token, "s:*": "r",
+            "rules": "projects/a:rw\n**/private:none"}, boss)
+        self.assertEqual(status, 200, page)
+        self.assertEqual(self.server.auth.users.get("anna").shares, [
+            {"path": "*", "access": "r"}, {"path": "**/private", "access": "none"},
+            {"path": "projects/a", "access": "rw"}])
+        self.assertIn("<code>**/private</code>", page)         # the patterns table
+        # "–" on a pattern removes it.
+        self.req("/admin", {"action": "shares", "name": "anna", "csrf": token,
+                            "s:*": "r", "s:**/private": ""}, boss)
+        self.assertEqual(self.server.auth.users.get("anna").shares,
+                         [{"path": "*", "access": "r"}])
+        status, _, page = self.req("/admin/shares?name=anna&check=projects/x.igz", cookie=boss)
+        self.assertEqual(status, 200)
+        self.assertIn("<code>projects/x.igz</code>:", page)
+
     def test_admin_changes_the_title(self):
         from viewer import site
         with mock.patch.dict(os.environ, {"INGETRAZO_STATE": self.tmp.name}):
