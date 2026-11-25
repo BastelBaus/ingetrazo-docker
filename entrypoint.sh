@@ -1,5 +1,5 @@
 #!/bin/sh
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Start one of the container's services inside an in-memory X server
 # (IngeTrazo needs an OpenGL context even with no window on screen).
 #   mcp     MCP over HTTP (default)

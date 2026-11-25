@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """The viewer's admin panel (``/admin``) and a user's own page
 (``/account``, with their settings): plain HTML forms, each with the
 session's CSRF token.

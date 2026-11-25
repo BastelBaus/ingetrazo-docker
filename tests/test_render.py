@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests of the viewer's on-demand rendering, with a fake IngeTrazo
 (no container needed):
 

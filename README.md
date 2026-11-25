@@ -332,4 +332,8 @@ read-only (`:ro`) for the MCP service too, as the example does, so the file syst
 
 ## License
 
-GPL-3.0-or-later, like IngeTrazo, which the image contains.
+AGPL-3.0-or-later (see [LICENSE](LICENSE)). The IngeTrazo inside the image stays under its own
+GPL-3.0-or-later; section 13 of the AGPL allows the combination.
+
+If you run a modified version as a network service, the AGPL asks you to offer its users the
+source of that version.

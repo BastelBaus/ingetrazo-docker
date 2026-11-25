@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """A tiny OpenID Connect provider for the smoke test – never for real use.
 
     mock_oidc.py <issuer-url> <port> <client-id> <client-secret>
