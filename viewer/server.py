@@ -1034,8 +1034,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/admin/shares" and auth.mode != "none":
             if not user.admin:
                 return self._html(403, message_page("Only admins manage the users.", "/", "Back"))
-            name = (parse_qs(parts.query).get("name") or [""])[0]
-            return self._html(200, admin.shares_page(auth, user, name, title=site.title()))
+            query = parse_qs(parts.query)
+            name = (query.get("name") or [""])[0]
+            check = (query.get("check") or [""])[0]
+            return self._html(200, admin.shares_page(auth, user, name, title=site.title(),
+                                                     check=check))
         if path.startswith("/avatar/") and path.endswith(".svg") and auth.mode != "none":
             from urllib.parse import unquote
             acc = auth.users.get(unquote(path[8:-4]))
