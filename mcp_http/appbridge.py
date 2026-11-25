@@ -45,7 +45,25 @@ def _load_stdio_server():
     # there is one IngeTrazo on a known port, which may still be finishing
     # an open_document when the next call looks its document up.
     module.DISCOVERY_TIMEOUT = max(module.DISCOVERY_TIMEOUT, 10.0)
+    # A long call (export_sheets of a big model in software rendering) may
+    # hold the app longer than its default; INGETRAZO_AI_TIMEOUT raises the
+    # bridge's limit (ingelibre/ingetrazo#1584). Wait a little longer than
+    # the bridge, so its own "timed out" answer arrives, even with an app
+    # whose client script does not read the variable yet.
+    limit = ai_timeout()
+    if limit is not None:
+        module.OPERATION_TIMEOUT = max(module.OPERATION_TIMEOUT, limit + 30.0)
     return module
+
+
+def ai_timeout() -> float | None:
+    """``INGETRAZO_AI_TIMEOUT`` in seconds, or None when unset/invalid."""
+    raw = os.environ.get("INGETRAZO_AI_TIMEOUT", "").strip()
+    try:
+        value = float(raw) if raw else 0.0
+    except ValueError:
+        return None
+    return value if value > 0 else None
 
 
 class App:

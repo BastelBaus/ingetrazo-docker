@@ -70,6 +70,9 @@ RUN set -e; \
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY mcp_http/ /opt/ingetrazo-docker/mcp_http/
 COPY viewer/ /opt/ingetrazo-docker/viewer/
+# A checkout with private file modes (umask 077, e.g. Komodo on TrueNAS) would
+# copy unreadable sources for the unprivileged user.
+RUN chmod -R a+rX /opt/ingetrazo-docker
 
 RUN useradd --create-home --uid 1000 ingetrazo \
  && mkdir -p /data /cache /state /users \
