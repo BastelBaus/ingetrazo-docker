@@ -39,6 +39,10 @@ from .view3d import THREE_DIR, view3d
 renderer: Renderer
 auth: Auth
 TITLE = os.environ.get("VIEWER_TITLE", "IngeTrazo viewer")
+#: How the View / 3D / Sheet dropdowns show folders by default: "list"
+#: (every level at once) or "tree" (one level at a time). Each browser can
+#: switch in the dropdown.
+NAV_MODE = "tree" if os.environ.get("VIEWER_NAV_MODE", "").strip().lower() == "tree" else "list"
 _SAFE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 CSS = """
@@ -81,7 +85,13 @@ border:1px solid var(--line);background:var(--card);padding:4px 8px;border-radiu
 .dd-panel{position:absolute;top:calc(100% + 6px);left:0;z-index:10;width:min(380px,calc(100vw - 24px));
 max-height:min(70vh,560px);display:flex;flex-direction:column;background:var(--card);border:1px solid var(--line);
 border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.18)}
-.dd-filter{margin:8px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit;font-size:14px}
+.dd-tools{display:flex;gap:6px;align-items:center;margin:8px}.dd-tools:empty{display:none}
+.dd-mode{flex:none;margin-left:auto;border:1px solid var(--line);background:var(--card);color:var(--fg);
+padding:4px 8px;border-radius:6px;font:inherit;font-size:12px;cursor:pointer}
+.dd-mode:hover{border-color:var(--accent)}
+.dd-up{display:block;padding:5px 12px;font-size:13px;color:var(--accent);cursor:pointer;border-bottom:1px solid var(--line);
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dd-up[hidden]{display:none}
+.dd-filter{flex:1;min-width:0;margin:0;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit;font-size:14px}
 .dd-list{overflow:auto;padding:4px 0 8px;font-size:14px}
 .dd-list a,.dd-list .f{display:block;padding:3px 12px 3px calc(12px + var(--d,0) * 14px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dd-list a{color:var(--fg)}.dd-list a:hover{background:var(--bg);text-decoration:none}
@@ -89,6 +99,11 @@ border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.18)}
 .dd-list .f{color:var(--muted);font-size:12px;padding-top:7px}.dd-list .f::before{content:"▸ "}
 .dd-list .none{font-style:italic}.dd-list .none::before{content:""}
 .dd-empty{color:var(--muted);padding:6px 12px;font-size:13px}
+.dd-list>[hidden]{display:none}
+.dd-list.tree>a,.dd-list.tree>.f{padding-left:12px}
+.dd-list.tree>.f{cursor:pointer;color:var(--fg);font-size:14px;padding-top:3px}
+.dd-list.tree>.f::before{content:""}.dd-list.tree>.f::after{content:" ›";color:var(--muted)}
+.dd-list.tree>.f:hover{background:var(--bg)}
 section h2{font-size:15px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:8px 0 12px}
 figure{margin:0 0 28px;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)}
 figure a.img{display:block;background:var(--sheet)}
@@ -156,25 +171,28 @@ JS = """
   }
   if (window.EventSource) connect();
 
-  // ---- the View / Sheet dropdowns of the top bar ----
+  // ---- the View / 3D / Sheet dropdowns of the top bar ----
   const header = document.querySelector('header');
   const dds = Array.from(document.querySelectorAll('details.dd'));
   if (!dds.length) return;
   function pad(){ document.documentElement.style.scrollPaddingTop = (header.offsetHeight + 8) + 'px'; }
   pad(); window.addEventListener('resize', pad);
   function closeAll(except){ dds.forEach(d => { if (d !== except) d.open = false; }); }
-  dds.forEach(dd => {
+  // "list": every level at once; "tree": one level, folders to step into.
+  // The server's default (data-nav), or what this browser chose.
+  let mode = document.body.dataset.nav === 'tree' ? 'tree' : 'list';
+  try { const m = localStorage.getItem('navmode'); if (m === 'tree' || m === 'list') mode = m; } catch (e) {}
+  const SEP = ' › ';
+  function setup(dd){
     const filter = dd.querySelector('.dd-filter');
-    dd.addEventListener('toggle', () => {
-      if (!dd.open) return;
-      closeAll(dd);
-      const on = dd.querySelector('a.on');
-      if (on) on.scrollIntoView({block: 'nearest'});
-      if (filter && matchMedia('(pointer:fine)').matches) filter.focus();
-    });
-    if (filter) filter.addEventListener('input', () => {
-      const q = filter.value.trim().toLowerCase();
-      const rows = Array.from(dd.querySelectorAll('.dd-list > *'));
+    const list = dd.querySelector('.dd-list');
+    const up = dd.querySelector('.dd-up');
+    const btn = dd.querySelector('.dd-mode');
+    const rows = Array.from(list.children);
+    const folders = rows.some(r => r.dataset.p);
+    let at = [];                              // the tree's current folder
+    function flat(q){
+      list.classList.remove('tree'); up.hidden = true;
       let any = false;
       rows.forEach(r => { if (r.tagName === 'A') {
         const hit = !q || (r.dataset.folder + ' ' + r.textContent).toLowerCase().includes(q);
@@ -188,8 +206,51 @@ JS = """
           if (rj.tagName === 'A' && !rj.hidden) { keep = true; break; } }
         r.hidden = !keep; });
       dd.querySelector('.dd-empty').hidden = any;
+    }
+    function tree(path){
+      at = path; const key = JSON.stringify(path);
+      list.classList.add('tree');
+      rows.forEach(r => { r.hidden = r.classList.contains('none') || r.dataset.in !== key; });
+      up.hidden = !path.length;
+      up.textContent = '‹ ' + path.join(SEP);
+      dd.querySelector('.dd-empty').hidden = true;
+    }
+    function show(){
+      const q = filter ? filter.value.trim().toLowerCase() : '';
+      if (btn) { btn.textContent = mode === 'tree' ? 'List' : 'Tree';
+                 btn.setAttribute('aria-pressed', String(mode === 'tree')); }
+      if (mode === 'tree' && folders && !q) tree(at); else flat(q);
+    }
+    dd._show = show;
+    function start(){
+      // The tree opens at the folder of what is on screen.
+      const on = dd.querySelector('a.on');
+      try { at = on ? JSON.parse(on.dataset.in || '[]') : []; } catch (e) { at = []; }
+    }
+    list.addEventListener('click', (e) => {
+      const f = e.target.closest('.f');
+      if (!f || !f.dataset.p || !list.classList.contains('tree')) return;
+      tree(JSON.parse(f.dataset.p));
     });
-  });
+    up.addEventListener('click', () => tree(at.slice(0, -1)));
+    if (btn) btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      mode = mode === 'tree' ? 'list' : 'tree';
+      try { localStorage.setItem('navmode', mode); } catch (err) {}
+      start(); dds.forEach(d => d._show && d._show());
+    });
+    dd.addEventListener('toggle', () => {
+      if (!dd.open) return;
+      closeAll(dd);
+      start(); show();
+      const on = dd.querySelector('a.on');
+      if (on && !on.hidden) on.scrollIntoView({block: 'nearest'});
+      if (filter && matchMedia('(pointer:fine)').matches) filter.focus();
+    });
+    if (filter) filter.addEventListener('input', show);
+    start(); show();
+  }
+  dds.forEach(setup);
   document.addEventListener('click', (e) => { if (!e.target.closest('details.dd')) closeAll(null); });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { closeAll(null); return; }
@@ -223,7 +284,7 @@ def _page(title: str, header: str, body: str, slug: str | None = None,
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{escape(title)}</title><style>{CSS}</style></head>
-<body data-slug="{escape(slug or '')}" data-wait="{escape(' '.join(wait or []))}"><header{' class="bar"' if bar else ''}>{header}{'' if bar else '<span class="spacer"></span>'}
+<body data-slug="{escape(slug or '')}" data-wait="{escape(' '.join(wait or []))}" data-nav="{NAV_MODE}"><header{' class="bar"' if bar else ''}>{header}{'' if bar else '<span class="spacer"></span>'}
 <span id="live" class="live"><i></i><span>connecting…</span></span>{_account(user)}</header>
 <main>{body}</main><script>{JS}</script></body></html>""".encode("utf-8")
 
@@ -253,16 +314,24 @@ def _folder(item: dict) -> list[str]:
     return [p for p in str(f or "").split("/") if p.strip()]
 
 
+def _path_json(path: list[str]) -> str:
+    """A folder path as the browser's JSON.stringify writes it (compared as
+    text by the tree's script)."""
+    return json.dumps(path, ensure_ascii=False, separators=(",", ":"))
+
+
 def _dropdown(label: str, entries: list[tuple[str, str, list[str]]],
-              current: str = "") -> str:
+              current: str = "", attrs: dict[str, str] | None = None) -> str:
     """One dropdown of the top bar: ``entries`` are (link, name, folder
     path) in document order, shown as a folder tree – in each folder its
     subfolders first, then its entries, as IngeTrazo's explorers do; the
     entries outside any folder come last, under "No folder". The entry
     whose link is ``current`` is marked and named in the closed dropdown;
-    without one, it shows how many entries there are."""
+    without one, it shows how many entries there are. ``attrs``: extra
+    HTML attributes of an entry, by its link."""
     if not entries:
         return ""
+    attrs = attrs or {}
     tree: dict = {"sub": {}, "items": []}
     for link, name, path in entries:
         node = tree
@@ -274,17 +343,21 @@ def _dropdown(label: str, entries: list[tuple[str, str, list[str]]],
     def item(link: str, name: str, path: list[str], depth: int) -> None:
         on = ' class="on" aria-current="page"' if link == current else ""
         rows.append(f'<a href="{escape(link)}"{on} style="--d:{depth}" '
-                    f'data-folder="{escape(SEP.join(path))}">{escape(name)}</a>')
+                    f'data-folder="{escape(SEP.join(path))}" '
+                    f'data-in="{escape(_path_json(path))}"{attrs.get(link, "")}>'
+                    f'{escape(name)}</a>')
 
-    def walk(node: dict, depth: int) -> None:
+    def walk(node: dict, depth: int, at: list[str]) -> None:
         for name, sub in node["sub"].items():
-            rows.append(f'<div class="f" style="--d:{depth}">{escape(name)}</div>')
-            walk(sub, depth + 1)
+            rows.append(f'<div class="f" style="--d:{depth}" '
+                        f'data-in="{escape(_path_json(at))}" '
+                        f'data-p="{escape(_path_json(at + [name]))}">{escape(name)}</div>')
+            walk(sub, depth + 1, at + [name])
         if depth:
             for e in node["items"]:
                 item(*e, depth)
 
-    walk(tree, 0)
+    walk(tree, 0, [])
     if tree["items"]:
         if tree["sub"]:
             rows.append('<div class="f none" style="--d:0">No folder</div>')
@@ -292,6 +365,10 @@ def _dropdown(label: str, entries: list[tuple[str, str, list[str]]],
             item(*e, 1 if tree["sub"] else 0)
     filt = ('<input class="dd-filter" type="search" placeholder="Filter…" '
             f'aria-label="Filter {escape(label.lower())}s">' if len(entries) > FILTER_FROM else "")
+    # List (every level at once) or tree (one level, folders to step into):
+    # a switch in the panel, kept per browser, for every dropdown alike.
+    mode = ('<button class="dd-mode" type="button" title="Show the folders as a list '
+            'or step through them as a tree">Tree</button>' if tree["sub"] else "")
     cur = f'<span class="cur muted">{len(entries)}</span>'
     for link, name, path in entries:
         if link == current:
@@ -300,10 +377,30 @@ def _dropdown(label: str, entries: list[tuple[str, str, list[str]]],
                    + (f'<span class="p">{where}</span>' if where else "")
                    + f'{escape(name)}</span>')
             break
-    return (f'<details class="dd"><summary><span class="k">{escape(label)}</span>'
-            f'{cur}</summary>'
-            f'<div class="dd-panel">{filt}<div class="dd-list">{"".join(rows)}</div>'
+    return (f'<details class="dd" data-kind="{escape(label.lower())}"><summary>'
+            f'<span class="k">{escape(label)}</span>{cur}</summary>'
+            f'<div class="dd-panel"><div class="dd-tools">{filt}{mode}</div>'
+            '<div class="dd-up" hidden></div>'
+            f'<div class="dd-list">{"".join(rows)}</div>'
             '<div class="dd-empty" hidden>Nothing matches.</div></div></details>')
+
+
+def _dropdown_3d(idx: dict, current: str, query: dict) -> str:
+    """The 3D dropdown: the whole model, then the saved views as cameras,
+    in the saved views' folders. On the 3D page a pick turns the camera
+    without reloading (view3d.py); elsewhere it opens the 3D page there."""
+    paths = {v["name"]: _folder(v) for v in idx.get("views", [])}
+    entries = [("?3d=1", "Whole model", [])]
+    attrs = {"?3d=1": ' data-cam="0"'}
+    for i, c in enumerate(idx.get("cameras") or []):
+        link = f"?3d=1&cam={i + 1}"
+        entries.append((link, str(c.get("name", "")), paths.get(c.get("name"), [])))
+        attrs[link] = f' data-cam="{i + 1}"'
+    if current:
+        raw = (query.get("cam") or [""])[0]
+        current = (f"?3d=1&cam={raw}" if raw.isdigit()
+                   and 1 <= int(raw) <= len(idx.get("cameras") or []) else "?3d=1")
+    return _dropdown("3D", entries, current, attrs)
 
 
 def _pending(text: str) -> str:
@@ -493,11 +590,10 @@ def model_page(slug: str, user: User | None = None,
         content += '<p class="empty">This model has no sheets and no saved views.</p>'
     pdf = ('<a class="btn" href="?pdf=1" target="_blank" title="All sheets as one PDF">PDF</a>'
            if WITH_PDF and sheets else "")
-    navs = _dropdown("View", view_nav, current) + _dropdown("Sheet", sheet_nav, current)
+    navs = _dropdown("View", view_nav, current)
     if has_3d:
-        on = ' on" aria-current="page' if kind == "3d" else ""
-        navs += (f'<a class="btn{on}" href="?3d=1" title="The model in 3D: '
-                 'drag to turn it, wheel to zoom">3D</a>')
+        navs += _dropdown_3d(idx, current if kind == "3d" else "", query or {})
+    navs += _dropdown("Sheet", sheet_nav, current)
     header = (f'<a class="btn" href="/" title="All models">←</a>'
               f'<h1 title="{escape(idx["name"])}">{escape(idx["name"])}</h1>'
               + (f'<nav class="navs">{navs}</nav>' if navs else "") + step

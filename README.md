@@ -9,11 +9,14 @@ container**:
 - **Live viewer (optional)**: a read-only web page with the **sheets** and **saved views** of every model in the
   model folders. The overview shows a small preview per model, folder by folder. A sheet or view is rendered when
   someone opens it, and kept until its file changes; the page refreshes by itself. A model page shows one
-  sheet or view at a time, fitted to the window. A slim top bar has a **View** and a **Sheet** dropdown with the
-  model's folders (nested too) and a filter, plus ‹ › buttons (or the ← → keys) to step through all of them. Each
-  sheet and view has its own link (`/m/<model>?sheet=2`, `?view=1`). A **3D** button shows the model in 3D in the
-  browser (three.js): drag to turn it, right-drag to move, wheel to zoom, the edges as lines, and the saved views
-  as camera presets (`?3d=1`). Models whose 3D file is bigger than `VIEWER_GLB_MAX_MB` get no 3D view.
+  sheet or view at a time, fitted to the window. A slim top bar has three dropdowns, **View**, **3D** and
+  **Sheet**, with the model's folders (nested too) and a filter, plus ‹ › buttons (or the ← → keys) to step
+  through the sheets and views. Each dropdown shows its folders either as a **list** (every level at once) or as a
+  **tree** (one level at a time: tap a folder to step in, ‹ to step out); the switch is in the dropdown and
+  `VIEWER_NAV_MODE` sets the default. Each sheet and view has its own link (`/m/<model>?sheet=2`, `?view=1`). The
+  **3D** dropdown shows the model in 3D in the browser (three.js): drag to turn it, right-drag to move, wheel to
+  zoom, the edges as lines; its entries are the whole model and the saved views as camera presets
+  (`?3d=1&cam=2`). Models whose 3D file is bigger than `VIEWER_GLB_MAX_MB` get no 3D view.
 - **Your models stay in folders you mount**: `./data` on the host, or several folders, each read-only or
   read/write for the MCP service (see [Model folders](#model-folders)).
 
@@ -116,6 +119,7 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `VIEWER_PASSWORD` | – | `local`: the password (user `VIEWER_USER`); login page for browsers, Basic auth for scripts |
 | `VIEWER_PRERENDER` | `previews` | What the viewer renders before anyone looks: `previews`, `none` or `all` (see [Rendering on demand](#rendering-on-demand)) |
 | `VIEWER_SHEET_DPI` | `120` | Sheet image resolution |
+| `VIEWER_NAV_MODE` | `list` | How the View / 3D / Sheet dropdowns show folders by default: `list` (all levels) or `tree` (one level at a time); each browser can switch |
 | `VIEWER_GLB_MAX_MB` | `50` | 3D view: a model whose GLB is bigger gets no 3D view (it is still rendered as sheets and views); `0` turns the 3D view off |
 | `INGETRAZO_IMAGE` | `ghcr.io/bastelbaus/ingetrazo:latest` | Image to pull (or tag to build) |
 | `INGETRAZO_REPO` / `INGETRAZO_REF` | fork / pinned commit | Which IngeTrazo to build |
