@@ -1,0 +1,61 @@
+# Release candidates: every push to release/vX.Y tags the next
+# vX.Y.Z-rc.N, makes a GitHub pre-release and starts publish.yml for it
+# (images :X.Y.Z-rc.N and :rc). Z is one above the newest vX.Y.Z release,
+# so a release branch kept after its release yields patch candidates.
+name: Release candidate
+
+on:
+  push:
+    branches: ["release/v*"]
+  workflow_dispatch:      # release-start.yml, or by hand on a release branch
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: release-rc-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  rc:
+    if: startsWith(github.ref_name, 'release/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Next release candidate
+        id: v
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          xy="${BRANCH#release/v}"
+          [[ $xy =~ ^[0-9]+\.[0-9]+$ ]] || { echo "::error::branch must be release/vX.Y"; exit 1; }
+          xy_re="${xy//./\\.}"
+          last=$(git tag -l "v$xy.*" | grep -E "^v$xy_re\.[0-9]+$" | sort -V | tail -1 || true)
+          if [[ -n $last ]]; then z=$(( ${last##*.} + 1 )); else z=0; fi
+          base="v$xy.$z"
+          if git tag --points-at HEAD | grep -qE "^v$xy_re\.$z-rc\.[0-9]+$"; then
+            echo "This commit is a release candidate already."
+            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          n=$(git tag -l "$base-rc.*" | sed -nE 's/.*-rc\.([0-9]+)$/\1/p' | sort -n | tail -1)
+          tag="$base-rc.$(( ${n:-0} + 1 ))"
+          prev=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+          { echo "skip=false"; echo "tag=$tag"; echo "prev=$prev"; } >> "$GITHUB_OUTPUT"
+
+      - name: Tag, pre-release, publish
+        if: steps.v.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
+          PREV: ${{ steps.v.outputs.prev }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" --target "$GITHUB_SHA" --prerelease --title "$TAG" \
+            --generate-notes ${PREV:+--notes-start-tag "$PREV"}
+          gh workflow run publish.yml --ref "$TAG"
+          echo "### Release candidate $TAG (images \`:${TAG#v}\`, \`:rc\`)" >> "$GITHUB_STEP_SUMMARY"
