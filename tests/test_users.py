@@ -304,6 +304,31 @@ class ViewerLoginTest(unittest.TestCase):
         self.assertEqual(self.req("/account", cookie=guest)[0], 303)
         self.assertEqual(self.req("/account", cookie=boss)[0], 200)
 
+    def test_avatar(self):
+        from viewer import avatar
+        boss = self.login("boss", "boss-password")
+        page = self.req("/account", cookie=boss)[2]
+        url = re.search(r'src="(/avatar/boss\.svg\?v=[^"]+)"', page).group(1)
+        status, headers, svg = self.req(url.replace("&amp;", "&"), cookie=boss)
+        self.assertEqual(status, 200)
+        self.assertIn(">B<", svg)                                      # initials
+        token = self.csrf(page)
+        for style in avatar.STYLES:
+            status, _, page = self.req("/account", {"action": "avatar", "style": style,
+                                                    "csrf": token}, boss)
+            self.assertEqual(status, 200, page)
+            got = self.server.auth.users.get("boss").avatar
+            self.assertEqual(avatar.valid(got)["style"], style)
+            self.assertTrue(avatar.svg("boss", got).startswith("<svg"))
+        self.assertNotEqual(re.search(r'src="(/avatar/boss\.svg\?v=[^"]+)"', page).group(1), url)
+        self.req("/account", {"action": "avatar_reset", "csrf": token}, boss)
+        self.assertIsNone(self.server.auth.users.get("boss").avatar)
+        self.assertEqual(self.req("/avatar/nobody.svg", cookie=boss)[0], 404)
+        self.assertEqual(self.req("/avatar/boss.svg")[0], 303)          # login first
+        # Something else in the column is not drawn as is.
+        self.assertIsNone(avatar.valid({"style": "pattern", "seed": "<script>", "hue": 1}))
+        self.assertIn("<svg", avatar.svg("x", {"style": "evil"}))
+
     def test_basic_auth_for_scripts(self):
         import base64
         r = urllib.request.Request(self.base + "/account", headers={

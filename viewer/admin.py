@@ -35,6 +35,7 @@ CSS = """
 .panel .note{background:color-mix(in srgb,var(--ok) 12%,var(--card));border:1px solid var(--ok);border-radius:8px;padding:8px 12px;margin:12px 0;font-size:14px}
 .panel .err{background:color-mix(in srgb,#c0392b 10%,var(--card));border:1px solid #c0392b;border-radius:8px;padding:8px 12px;margin:12px 0;font-size:14px;color:inherit}
 .panel .off td:not(.acts){color:var(--muted)}
+.panel .avatar-box{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .panel .rights{display:inline-flex;gap:0}
 .panel .right{border:1px solid var(--line);background:var(--card);color:var(--muted);padding:5px 9px;font-size:12px;border-radius:0;text-decoration:line-through}
 .panel .rights>:first-child .right,.panel .rights>.right:first-child{border-radius:6px 0 0 6px}
@@ -122,8 +123,10 @@ def page(auth, user, note: str = "", error: str = "", title: str = "") -> bytes:
                                   '<button class="danger">Remove</button>',
                                   confirm=f"Remove {acc.name}?"))
         last = escape((acc.last_login or "–").replace("T", " ").replace("+00:00", " UTC"))
+        from .server import avatar_img
         rows.append(
-            f'<tr class="{"" if acc.active else "off"}"><td><strong>{escape(acc.name)}</strong>'
+            f'<tr class="{"" if acc.active else "off"}"><td>{avatar_img(acc.name, 24)} '
+            f'<strong>{escape(acc.name)}</strong>'
             + (' <span class="muted">(you)</span>' if me else "")
             + ("" if acc.active else ' <span class="tag">off</span>')
             + f'</td><td>{role}</td><td>{escape(acc.source)}</td><td class="muted">{last}</td>'
@@ -329,9 +332,32 @@ def account_page(auth, user, note: str = "", error: str = "", title: str = "") -
               '<label for="n">New password</label><input id="n" name="password" type="password" '
               'autocomplete="new-password" required>'
               '<button class="primary">Change password</button></form>')
-    settings = _settings_form(auth, user) if acc else ""
+    settings = (_avatar_form(auth, user, acc) + _settings_form(auth, user)) if acc else ""
     return _wrap("Account", _messages(note, error) + info + settings + pw
                  + _tokens(auth, user, acc), user, title)
+
+
+def _avatar_form(auth, user, acc) -> str:
+    """The user's avatar: pick a style, press New until one fits."""
+    from . import avatar
+    from .server import avatar_img
+    current = (avatar.valid(acc.avatar) or {}).get("style", "initials")
+    csrf = auth.sessions.csrf(user.name)
+    opts = "".join(f'<option{" selected" if st == current else ""}>{st}</option>'
+                   for st in avatar.STYLES)
+    shared = ' <span class="muted">(every guest sees the same)</span>' if acc.source == "guest" else ""
+    return ('<h2>Avatar</h2><div class="avatar-box">' + avatar_img(acc.name, 72)
+            + '<form class="inline" method="post" action="/account">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            '<input type="hidden" name="action" value="avatar">'
+            f'<select name="style" aria-label="Style">{opts}</select>'
+            '<button class="primary">New</button></form>'
+            + ("" if acc.avatar is None else
+               '<form class="inline" method="post" action="/account">'
+               f'<input type="hidden" name="csrf" value="{csrf}">'
+               '<input type="hidden" name="action" value="avatar_reset">'
+               '<button>Default</button></form>')
+            + shared + '</div>')
 
 
 def _tokens(auth, user, acc) -> str:
@@ -371,6 +397,13 @@ def act_account(auth, user, form: dict) -> tuple[str, str]:
             auth.users.set_settings(user.name, {k: setting_value(k, get(k)) for k in LABELS
                                                 if k in form})
             return "Your settings are saved.", ""
+        if get("action") == "avatar":
+            from . import avatar
+            auth.users.set_avatar(user.name, avatar.fresh(get("style")))
+            return "A new avatar. Press New again for another.", ""
+        if get("action") == "avatar_reset":
+            auth.users.set_avatar(user.name, None)
+            return "Back to the default avatar.", ""
         if get("action") == "token":
             token = auth.users.create_token(user.name, get("label"))
             return "TOKEN:" + token, ""

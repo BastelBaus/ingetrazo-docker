@@ -243,6 +243,9 @@ The users live in one SQLite file, `users.db`, on the volume `users` that both s
 - **`oidc` and `proxy`**: a user is added on first login, as `user`. With `OIDC_ADMIN_GROUP` / `PROXY_ADMIN_GROUP`
   set, that group decides who is admin; without it, the admin panel does. Passwords stay with the provider.
 - **Everyone** sees their account at `/account` (their name in the top bar); local users change their password there.
+- **Avatar**: at `/account` each user makes their own: pick a style (`pattern`, `initials` or `shapes`) and press
+  *New* until one fits. It is drawn in the container as SVG from a few values; nothing is uploaded. It shows in the
+  top bar and in the admin panel; without one, the initials of the name.
 - **Folders per user**: at `/admin` → *Folders* an admin gives each user model folders, or folders inside them,
   with *Read*, *Read & write* or *No access* (to carve a folder out of a wider share); the most specific setting
   wins, and a read-only model folder stays read-only. The viewer shows a user only what they may read; *write*

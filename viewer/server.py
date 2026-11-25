@@ -10,6 +10,7 @@ one model, one sheet or view at a time (``?sheet=N`` / ``?view=N``,
 the 3D view's script library (three.js), ``/events`` server-sent events
 (a listing or render started or finished),
 ``/admin`` the user list (admins), ``/account`` one's own account,
+``/avatar/<user>.svg`` a user's avatar,
 ``/healthz`` (always open). Who may see the rest: ``VIEWER_AUTH_MODE``
 (see auth.py) — ``local`` (``/login``, ``/logout``, Basic auth for
 scripts), ``none``, ``oidc`` (``/auth/login``, ``/auth/callback``) or
@@ -34,7 +35,7 @@ from mcp_http import folders, shares
 from mcp_http.appbridge import App, log
 from mcp_http.users import UserError
 
-from . import admin
+from . import admin, avatar
 from .auth import Auth, User
 from .render import (CACHE_DIR, GLB_MAX_MB, NEXT, NOW, POLL, PRERENDER, PREVIEW,
                      WITH_PDF, Renderer)
@@ -128,7 +129,8 @@ header.bar{flex-wrap:wrap}header.bar h1{max-width:none;flex:1}header.bar .meta{d
 .dd-panel{left:12px;width:auto;right:12px}}
 .btn.on{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,var(--card));font-weight:600}
 a.btn:hover{text-decoration:none;border-color:var(--accent)}
-.who{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:14em}
+.who{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:14em;display:inline-flex;align-items:center;gap:6px}
+img.avatar{border-radius:50%;flex:none;vertical-align:middle}
 @media (max-width:820px){.who{display:none}}
 .pending{display:flex;align-items:center;justify-content:center;min-height:min(60vh,520px);background:var(--sheet);color:#6b6b66}
 .pending span::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px;
@@ -288,7 +290,7 @@ def _account(user: User | None) -> str:
         return ""
     role = " (admin)" if user.admin else ""
     who = (f'<a class="muted who" href="/account" title="{escape(user.name + role)}">'
-           f'{escape(user.name)}</a>')
+           f'{avatar_img(user.name, 22)}{escape(user.name)}</a>')
     admin = '<a class="btn" href="/admin" title="Users">Users</a>' if user.admin else ""
     out = ('<a class="btn" href="/logout">Log out</a>'
            if auth.mode != "proxy" or auth.proxy.logout_url else "")
@@ -306,6 +308,16 @@ def _settings(user: User | None) -> str:
             and auth.users.get(user.name) is not None:
         out += f' data-csrf="{auth.sessions.csrf(user.name)}"'
     return out
+
+
+def avatar_img(name: str, size: int) -> str:
+    """A user's avatar as an <img> (the URL changes with the avatar)."""
+    acc = auth.users.get(name) if getattr(auth, "users", None) is not None else None
+    if acc is None:
+        return ""
+    a = avatar.valid(acc.avatar) or avatar.default(acc.name)
+    return (f'<img class="avatar" src="/avatar/{quote(acc.name)}.svg?v={a["seed"]}{a["hue"]}" '
+            f'width="{size}" height="{size}" alt="">')
 
 
 def _page(title: str, header: str, body: str, slug: str | None = None,
@@ -1004,6 +1016,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._html(403, message_page("Only admins manage the users.", "/", "Back"))
             name = (parse_qs(parts.query).get("name") or [""])[0]
             return self._html(200, admin.shares_page(auth, user, name, title=TITLE))
+        if path.startswith("/avatar/") and path.endswith(".svg") and auth.mode != "none":
+            from urllib.parse import unquote
+            acc = auth.users.get(unquote(path[8:-4]))
+            if acc is None:
+                return self._send(404, b"not found\n", "text/plain")
+            return self._send(200, avatar.svg(acc.name, acc.avatar).encode(),
+                              "image/svg+xml", {"Cache-Control": "private, max-age=86400",
+                                                "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'"})
         if path == "/account" and auth.mode != "none":
             return self._html(200, admin.account_page(auth, user, title=TITLE))
         if path.startswith("/m/"):
