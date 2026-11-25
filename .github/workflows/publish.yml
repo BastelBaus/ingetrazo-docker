@@ -104,7 +104,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=IngeTrazo (headless)
             org.opencontainers.image.description=IngeTrazo headless: MCP over HTTP and a live sheet/view viewer
-            org.opencontainers.image.licenses=GPL-3.0-or-later
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
             org.opencontainers.image.version=${{ steps.plan.outputs.version }}
             io.github.ingetrazo.repo=${{ steps.ref.outputs.repo }}
             io.github.ingetrazo.ref=${{ steps.ref.outputs.ref }}

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Read-only live viewer: the sheets and saved views of the models in the
 model folders, in the browser, rendered when someone looks at them
 (render.py) and refreshed when a model file changes.

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Who may see the viewer: ``VIEWER_AUTH_MODE`` (or ``AUTH_MODE``).
 
 - ``local`` (default) – the built-in login: the users of the user list

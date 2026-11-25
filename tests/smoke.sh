@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # End-to-end smoke test of an image: the MCP service and the viewer, on a
 # data folder with one of IngeTrazo's example models.
 #

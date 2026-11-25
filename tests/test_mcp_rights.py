@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests of who may do what over MCP: MCP_TOKEN, personal tokens,
 OAuth users, and their folders (no container needed):
 
