@@ -68,7 +68,9 @@ def page(auth, user, note: str = "", error: str = "", title: str = "") -> bytes:
     for acc in auth.users.all():
         me = acc.name.lower() == user.name.lower()
         acts = []
-        if by_group and acc.source != "local":
+        if acc.source == "guest":
+            role = f'{acc.role} <span class="muted">(guest)</span>'
+        elif by_group and acc.source != "local":
             role = f'{acc.role} <span class="muted">(group)</span>'
         else:
             opts = "".join(f'<option{" selected" if r == acc.role else ""}>{r}</option>'
@@ -85,8 +87,10 @@ def page(auth, user, note: str = "", error: str = "", title: str = "") -> bytes:
             acts.append(_form(auth, user, "active", acc.name,
                               f'<input type="hidden" name="on" value="{0 if acc.active else 1}">'
                               f'<button>{"Switch off" if acc.active else "Switch on"}</button>'))
-            acts.append(_form(auth, user, "delete", acc.name, '<button class="danger">Remove</button>',
-                              confirm=f"Remove {acc.name}?"))
+            if acc.source != "guest":
+                acts.append(_form(auth, user, "delete", acc.name,
+                                  '<button class="danger">Remove</button>',
+                                  confirm=f"Remove {acc.name}?"))
         last = escape((acc.last_login or "–").replace("T", " ").replace("+00:00", " UTC"))
         rows.append(
             f'<tr class="{"" if acc.active else "off"}"><td><strong>{escape(acc.name)}</strong>'
@@ -202,8 +206,12 @@ def account_page(auth, user, note: str = "", error: str = "", title: str = "") -
     """The user's own page: who they are, their settings, and (local
     users) a new password."""
     acc = auth.users.get(user.name)
-    info = (f'<p>Logged in as <strong>{escape(user.name)}</strong>, {escape(user.role)}'
-            f'{", through " + escape(acc.source) if acc and acc.source != "local" else ""}.</p>')
+    if acc and acc.source == "guest":
+        info = ('<p>Logged in as <strong>guest</strong>. Every guest shares these '
+                'settings.</p>')
+    else:
+        info = (f'<p>Logged in as <strong>{escape(user.name)}</strong>, {escape(user.role)}'
+                f'{", through " + escape(acc.source) if acc and acc.source != "local" else ""}.</p>')
     pw = ""
     if acc and acc.source == "local" and auth.mode == "local":
         pw = ('<h2>Password</h2><form class="stack" method="post" action="/account">'

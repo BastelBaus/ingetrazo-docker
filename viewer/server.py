@@ -676,6 +676,8 @@ background:var(--bg);color:var(--fg);font:inherit}
 background:var(--accent);color:#fff;font:inherit;font-weight:600;cursor:pointer}
 .login .go:hover{text-decoration:none}.login p{margin:0 0 8px}
 .err{color:#c0392b;font-size:14px;margin:0 0 8px}
+.login .guest{margin:0}.login button.alt{background:transparent;color:var(--accent);border:1px solid var(--line);font-weight:500}
+.login button.alt:hover{border-color:var(--accent)}
 """
 
 
@@ -686,13 +688,26 @@ def _card(title: str, inner: str) -> bytes:
 <body><main><div class="login"><h1>{escape(TITLE)}</h1>{inner}</div></main></body></html>""".encode("utf-8")
 
 
+def _guest_button(nxt: str) -> str:
+    """"Log in as guest" (VIEWER_GUEST), under the login."""
+    if not getattr(auth, "guest", False):
+        return ""
+    return (f'<form method="post" action="/login/guest" class="guest">'
+            f'<input type="hidden" name="next" value="{escape(nxt)}">'
+            '<button type="submit" class="alt">Log in as guest</button></form>')
+
+
 def login_page(error: str, nxt: str) -> bytes:
     err = f'<p class="err">{escape(error)}</p>' if error else ""
+    if auth.mode == "oidc":                    # a choice: the provider or a guest
+        go = "/auth/login?" + urlencode({"next": nxt})
+        return _card("Log in", f'{err}<a class="go" href="{escape(go)}">Log in</a>'
+                               + _guest_button(nxt))
     return _card("Log in", f"""<form method="post" action="/login">{err}
 <input type="hidden" name="next" value="{escape(nxt)}">
 <label for="u">User</label><input id="u" name="user" autocomplete="username" autofocus>
 <label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password">
-<button type="submit">Log in</button></form>""")
+<button type="submit">Log in</button></form>""" + _guest_button(nxt))
 
 
 def message_page(text: str, link: str = "", label: str = "", extra: str = "") -> bytes:
@@ -779,7 +794,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(401, b"authentication required (through the proxy)\n",
                            "text/plain")
         elif page:
-            where = "/login" if auth.mode == "local" else "/auth/login"
+            where = "/login" if auth.mode == "local" or auth.guest else "/auth/login"
             self._send(303, b"", "text/plain",
                        {"Location": where + "?next=" + quote(target, safe="")})
         elif auth.mode == "local":
@@ -822,6 +837,13 @@ class Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == "/login" and auth.mode == "local":
             return self._post_login()
+        if path == "/login/guest" and auth.guest:
+            nxt = _safe_next((self._form().get("next") or ["/"])[0])
+            user = auth.guest_login()
+            if user is None:
+                return self._login_page(403, "Guests may not log in at the moment.", nxt)
+            return self._send(303, b"", "text/plain", {
+                "Location": nxt, "Set-Cookie": self._session_cookie(user)})
         if path == "/account/settings" and auth.mode != "none":
             return self._post_settings()
         if path in ("/admin", "/account") and auth.mode != "none":
@@ -881,7 +903,7 @@ class Handler(BaseHTTPRequestHandler):
         nxt = _safe_next((query.get("next") or ["/"])[0])
         clear = f"{COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
         if path == "/login":
-            if auth.mode == "local":
+            if auth.mode == "local" or auth.guest:
                 self._login_page(nxt=nxt)
             elif auth.mode == "oidc":
                 self._send(303, b"", "text/plain",
@@ -893,6 +915,9 @@ class Handler(BaseHTTPRequestHandler):
             if auth.mode == "local":
                 self._send(303, b"", "text/plain",
                            {"Location": "/login", "Set-Cookie": clear})
+            elif auth.mode == "oidc" and self._cookie_user() is not None \
+                    and self._cookie_user().source == "guest":
+                self._send(303, b"", "text/plain", {"Location": "/login", "Set-Cookie": clear})
             elif auth.mode == "oidc":
                 end = auth.oidc.end_session()
                 extra = (f'<p class="muted"><a href="{escape(end)}?'

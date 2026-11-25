@@ -41,7 +41,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from mcp_http.appbridge import log
-from mcp_http.users import Account, Users
+from mcp_http.users import Account, UserError, Users
 
 MODES = ("local", "none", "oidc", "proxy")
 STATE_DIR = Path(os.environ.get("INGETRAZO_STATE", "/state"))
@@ -90,7 +90,7 @@ class Sessions:
         return hmac.new(self.key, payload.encode(), hashlib.sha256).hexdigest()
 
     def issue(self, user: User) -> str:
-        payload = _b64(json.dumps({"u": user.name, "r": user.role,
+        payload = _b64(json.dumps({"u": user.name, "r": user.role, "s": user.source,
                                    "e": int(time.time()) + self.max_age}).encode())
         return f"{payload}.{self._sig(payload)}"
 
@@ -104,7 +104,8 @@ class Sessions:
             return None
         if not isinstance(data, dict) or int(data.get("e", 0)) < time.time():
             return None
-        return User(str(data.get("u", "")), str(data.get("r", "user")))
+        return User(str(data.get("u", "")), str(data.get("r", "user")),
+                    str(data.get("s", "local")))
 
     def csrf(self, name: str) -> str:
         """The token a form of this user's pages carries (admin, account)."""
@@ -317,6 +318,16 @@ class Auth:
                     "the viewer's login (VIEWER_AUTH_MODE=local, the default) needs "
                     "VIEWER_PASSWORD for its first admin. For a viewer without any "
                     "login, say so: VIEWER_AUTH_MODE=none")
+        # "Log in as guest": one guest user (mcp_http/users.py GUEST) for
+        # whoever does not log in, with a login page to offer it on.
+        self.guest = _flag("VIEWER_GUEST")
+        if self.guest and self.mode not in ("local", "oidc"):
+            log(f"viewer: VIEWER_GUEST is for the local and oidc logins, not {self.mode}; ignored")
+            self.guest = False
+        if self.guest:
+            acc = self.users.ensure_guest()
+            log("viewer: guests may log in" + ("" if acc.active else
+                " (but the guest user is switched off in the admin panel)"))
         if self.mode == "none":
             log("WARNING: VIEWER_AUTH_MODE=none — anyone who reaches the viewer "
                 "sees every model in the data folder. Use it only on a trusted "
@@ -342,12 +353,21 @@ class Auth:
         acc = self.users.authenticate(name, pw)
         return User.of(acc) if acc else None
 
+    def guest_login(self) -> User | None:
+        """``VIEWER_GUEST``: the guest user, unless an admin switched it off."""
+        if not self.guest:
+            return None
+        acc = self.users.guest()
+        return User.of(acc) if acc else None
+
     def current(self, user: User) -> User | None:
         """A session's user as the list has them now: None when removed or
         switched off, with the role they have now."""
         if self.users is None:
             return user
         acc = self.users.get(user.name)
+        if acc and acc.source == "guest" and not self.guest:
+            return None                       # guests no longer welcome
         return User.of(acc) if acc and acc.active else None
 
     def settings(self, user: User | None) -> dict:
@@ -361,8 +381,12 @@ class Auth:
 
     def _seen(self, name: str, groups: list[str], source: str) -> User | None:
         group = self.admin_group
-        acc = self.users.seen(name, source, groups,
-                              (group in groups) if group else None)
+        try:
+            acc = self.users.seen(name, source, groups,
+                                  (group in groups) if group else None)
+        except UserError as exc:
+            log(f"viewer: {source} user {name!r} refused: {exc}")
+            return None
         if acc.source != source:
             log(f"viewer: {name!r} came through {source} but is a {acc.source} user; refused")
             return None
