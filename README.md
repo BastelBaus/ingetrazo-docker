@@ -116,6 +116,7 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `OAUTH_USER` / `OAUTH_PASSWORD` | `admin` / – | `oauth`: who approves clients (password at least 12 characters) |
 | `OAUTH_REDIRECT_URIS` | claude.ai, claude.com, loopback | `oauth`: redirect URIs clients may register (comma-separated) |
 | `VIEWER_AUTH_MODE` | `local` | Viewer login: `local`, `none`, `oidc` or `proxy` (see [Viewer login](#viewer-login)) |
+| `DEFAULT_SHARES` | `*:r` | The folders of a user an admin has not set any for: `path:access; …` with `r`, `rw` or `none`, `*` = every folder (see [Users](#users)) |
 | `VIEWER_GUEST` | `false` | `local` / `oidc`: a *Log in as guest* button on the login page (see [Users](#users)) |
 | `VIEWER_PASSWORD` | – | `local`: the password (user `VIEWER_USER`); login page for browsers, Basic auth for scripts |
 | `VIEWER_PRERENDER` | `previews` | What the viewer renders before anyone looks: `previews`, `none` or `all` (see [Rendering on demand](#rendering-on-demand)) |
@@ -242,6 +243,11 @@ The users live in one SQLite file, `users.db`, on the volume `users` that both s
 - **`oidc` and `proxy`**: a user is added on first login, as `user`. With `OIDC_ADMIN_GROUP` / `PROXY_ADMIN_GROUP`
   set, that group decides who is admin; without it, the admin panel does. Passwords stay with the provider.
 - **Everyone** sees their account at `/account` (their name in the top bar); local users change their password there.
+- **Folders per user**: at `/admin` → *Folders* an admin gives each user model folders, or folders inside them,
+  with *Read*, *Read & write* or *No access* (to carve a folder out of a wider share); the most specific setting
+  wins, and a read-only model folder stays read-only. The viewer shows a user only what they may read; *write*
+  is for saving and exporting through MCP. Admins have everything. A user nobody has set folders for gets
+  `DEFAULT_SHARES` (default `*:r`: every folder, read), e.g. `DEFAULT_SHARES=*:none; projects/public:r`.
 - **Guest** (`VIEWER_GUEST=true`, for the `local` and `oidc` logins): the login page gets a **Log in as guest**
   button that lets anyone in without a password, as the one user `guest`. The guest has settings like everyone
   else (shared by all guests), is never an admin, and an admin can switch it off in the panel without restarting.

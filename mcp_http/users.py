@@ -5,8 +5,9 @@ mount, so the viewer and the MCP server share one list.
 
 A user has a name, a role (``admin`` or ``user``), where they come from
 (``local``: a password kept here; ``oidc`` / ``proxy``: logged in
-elsewhere, recorded on first login), whether they are active, and the
-settings they work with (``SETTINGS``, kept as they change them). Admins
+elsewhere, recorded on first login), whether they are active, the
+settings they work with (``SETTINGS``, kept as they change them) and the
+folders they may see and write (``shares``, see shares.py). Admins
 manage the list in the viewer's admin panel (``/admin``).
 
 Passwords are stored as scrypt hashes. The schema carries its version in
@@ -50,6 +51,9 @@ MIGRATIONS: list[str] = [
        )""",
     # 2: the settings a user works with (SETTINGS), as JSON.
     "ALTER TABLE users ADD COLUMN config TEXT NOT NULL DEFAULT '{}'",
+    # 3: the folders a user may see and write (mcp_http/shares.py), as JSON;
+    # NULL: DEFAULT_SHARES.
+    "ALTER TABLE users ADD COLUMN shares TEXT",
 ]
 
 #: The settings a user keeps (the viewer's and later the MCP server's):
@@ -98,6 +102,7 @@ class Account:
     created: str = ""
     last_login: str | None = None
     config: dict = field(default_factory=dict)
+    shares: list | None = None           # None: DEFAULT_SHARES
 
     @property
     def admin(self) -> bool:
@@ -149,9 +154,14 @@ class Users:
             config = json.loads(row["config"] or "{}")
         except ValueError:
             config = {}
+        try:
+            shares = json.loads(row["shares"]) if row["shares"] is not None else None
+        except ValueError:
+            shares = []                       # unreadable: nothing, not everything
         return Account(row["name"], row["role"], row["source"], bool(row["active"]),
                        bool(row["password"]), groups, row["created"], row["last_login"],
-                       config if isinstance(config, dict) else {})
+                       config if isinstance(config, dict) else {},
+                       shares if isinstance(shares, list) or shares is None else [])
 
     def get(self, name: str) -> Account | None:
         with self._lock:
@@ -331,6 +341,20 @@ class Users:
             return None
         self._touch(acc.name)
         return acc
+
+    def set_shares(self, name: str, shares: list | None) -> list | None:
+        """The folders a user may see and write (mcp_http/shares.py); None:
+        back to DEFAULT_SHARES."""
+        from .shares import validate
+        acc = self._require(name)
+        try:
+            value = None if shares is None else validate(shares)
+        except ValueError as exc:
+            raise UserError(str(exc)) from None
+        with self._lock:
+            self._db.execute("UPDATE users SET shares = ? WHERE name = ?",
+                             (None if value is None else json.dumps(value), acc.name))
+        return value
 
     def ensure_admin(self, name: str, password: str) -> bool:
         """The first admin, from the environment: created when there is no

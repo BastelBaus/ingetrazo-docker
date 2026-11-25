@@ -5,13 +5,16 @@ session's CSRF token.
 
 Admins add local users (``VIEWER_AUTH_MODE=local``), set a user's role
 (unless the provider's admin group decides it), switch users off and on,
-set a local user's password, and remove users. The list always keeps one
+set a local user's password, give them folders (``/admin/shares``, see
+mcp_http/shares.py), and remove users. The list always keeps one
 active admin, and an admin cannot switch themself off or remove themself.
 """
 from __future__ import annotations
 
 from html import escape
+from urllib.parse import quote
 
+from mcp_http import shares as share_mod
 from mcp_http.users import ROLES, SETTINGS, UserError
 
 CSS = """
@@ -83,6 +86,11 @@ def page(auth, user, note: str = "", error: str = "", title: str = "") -> bytes:
                               '<input name="password" type="password" placeholder="New password" '
                               'autocomplete="new-password" aria-label="New password" required>'
                               '<button>Set password</button>'))
+        if not acc.admin:
+            n = ("default" if acc.shares is None else
+                 f"{sum(1 for x in acc.shares if x['access'] != 'none')} shared")
+            acts.append(f'<a class="btn" href="/admin/shares?name={quote(acc.name)}">'
+                        f'Folders <span class="muted">({n})</span></a>')
         if not me:
             acts.append(_form(auth, user, "active", acc.name,
                               f'<input type="hidden" name="on" value="{0 if acc.active else 1}">'
@@ -151,6 +159,22 @@ def act(auth, user, form: dict) -> tuple[str, str]:
             on = get("on") == "1"
             users.set_active(name, on)
             return f"{name} is switched {'on' if on else 'off'}.", ""
+        if action == "shares":
+            acc = users.get(name)
+            if acc is None:
+                raise UserError(f"there is no user {name!r}")
+            if get("default") == "1":
+                users.set_shares(name, None)
+                return f"{name} has the default folders again.", ""
+            chosen = []
+            for key, vals in form.items():
+                if key.startswith("s:") and vals[0] in share_mod.ACCESS:
+                    chosen.append({"path": key[2:] or share_mod.ALL, "access": vals[0]})
+            extra = get("add_path").strip()
+            if extra:
+                chosen.append({"path": extra, "access": get("add_access") or "r"})
+            users.set_shares(name, chosen)
+            return f"Folders of {name} saved.", ""
         if action == "delete":
             if me:
                 raise UserError("you cannot remove yourself")
@@ -159,6 +183,61 @@ def act(auth, user, form: dict) -> tuple[str, str]:
         raise UserError("unknown action")
     except UserError as exc:
         return "", str(exc)[:1].upper() + str(exc)[1:] + "."
+
+
+ACCESS_NAMES = {"": "–", "none": "No access", "r": "Read", "rw": "Read & write"}
+
+
+def shares_page(auth, user, name: str, note: str = "", error: str = "",
+                title: str = "") -> bytes:
+    """One user's folders, for an admin: each model folder and the folders
+    in it, with what the user may do there."""
+    acc = auth.users.get(name)
+    if acc is None:
+        return _wrap("Folders", _messages("", f"There is no user {name}."), user, title)
+    own = {s["path"]: s["access"] for s in (acc.shares or [])}
+    using_default = acc.shares is None
+    current = own if not using_default else {
+        s["path"]: s["access"] for s in share_mod.defaults()}
+    paths = [share_mod.ALL] + share_mod.tree()
+    paths += [p for p in current if p not in paths]
+    rows = []
+    for path in paths:
+        depth = 0 if path in (share_mod.ALL, "") else path.count("/") + 1
+        label = "All folders" if path == share_mod.ALL else (path.rsplit("/", 1)[-1] or "data")
+        here = current.get(path, "")
+        opts = "".join(f'<option value="{v}"{" selected" if v == here else ""}>{escape(t)}</option>'
+                       for v, t in ACCESS_NAMES.items())
+        got = share_mod.effective(acc, "*" if path in (share_mod.ALL, "") else path) \
+            if not acc.admin else "rw"
+        rows.append(f'<tr><td style="padding-left:{10 + depth * 18}px" title="{escape(path)}">'
+                    f'{escape(label)}</td><td><select name="s:{escape(path)}" '
+                    f'aria-label="Access to {escape(label)}">{opts}</select></td>'
+                    f'<td class="muted">{escape(ACCESS_NAMES[got])}</td></tr>')
+    csrf = auth.sessions.csrf(user.name)
+    body = (_messages(note, error)
+            + f'<p>What <strong>{escape(acc.name)}</strong> may see (and, through MCP, write). '
+            '“–” takes what the folder above says; the most specific setting wins. '
+            'Read-only model folders stay read-only.</p>'
+            + ('<p class="muted">Now: the default for every user (DEFAULT_SHARES). '
+               'Saving below gives this user their own.</p>' if using_default else "")
+            + '<form method="post" action="/admin">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            '<input type="hidden" name="action" value="shares">'
+            f'<input type="hidden" name="name" value="{escape(acc.name)}">'
+            '<table><thead><tr><th>Folder</th><th>Share</th><th>Result</th></tr></thead><tbody>'
+            + "".join(rows) + '</tbody></table>'
+            '<div class="add" style="margin-top:12px"><input name="add_path" placeholder="Another folder, e.g. projects/2026/x" '
+            'aria-label="Another folder">'
+            '<select name="add_access" aria-label="Access"><option value="r">Read</option>'
+            '<option value="rw">Read &amp; write</option><option value="none">No access</option></select>'
+            '<span class="spacer"></span><button class="primary">Save</button></div></form>'
+            + ("" if using_default else
+               _form(auth, user, "shares", acc.name,
+                     '<input type="hidden" name="default" value="1">'
+                     '<button>Back to the default</button>'))
+            + '<p><a href="/admin">← All users</a></p>')
+    return _wrap(f"Folders of {acc.name}", body, user, title)
 
 
 #: How the account page names the settings and their values.
