@@ -145,9 +145,12 @@ docker run --rm --network "$net" --ip "$SUB.10" -v "$TESTS:/tests:ro" \
   --entrypoint python "$IMAGE" /tests/smoke_auth.py proxy-trusted "http://$SUB.5:8080"
 "$PY" "$TESTS/smoke_auth.py" oidc "http://127.0.0.1:$OIDC_VIEWER_PORT" \
   "http://127.0.0.1:$OIDC_PORT"
-docker exec "$v_oidc" cat /state/users.json | grep -q '"alice"'
-docker exec "$v_proxy" cat /state/users.json | grep -q '"bob"'
-echo "  ok  oidc and proxy users recorded in /state/users.json"
+users_in() {
+  docker exec "$1" python -c 'import sqlite3; print([r[0] for r in sqlite3.connect("/state/users.db").execute("select name from users")])'
+}
+users_in "$v_oidc" | grep -q "'alice'"
+users_in "$v_proxy" | grep -q "'bob'"
+echo "  ok  oidc and proxy users recorded in the user list (users.db)"
 
 for c in "$mcp" "$viewer"; do
   for _ in $(seq 1 60); do
