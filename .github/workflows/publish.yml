@@ -1,0 +1,134 @@
+# Build the image and publish it to the GitHub Container Registry.
+#
+#   push to dev            -> :dev, :dev-<sha>                  (amd64)
+#   manual run on a branch -> :br-<branch>                      (amd64)
+#   tag vX.Y.Z-rc.N        -> :X.Y.Z-rc.N, :rc                  (amd64 + arm64)
+#   tag vX.Y.Z             -> :X.Y.Z, :X.Y, :stable, :latest    (amd64 + arm64)
+#
+# Release tags are made by release-rc.yml and release-finalize.yml. Tags
+# pushed with GITHUB_TOKEN start no workflow, so those two start this one
+# with workflow_dispatch on the tag. Tags pushed by hand start it directly.
+name: Publish
+
+on:
+  push:
+    branches: [dev]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  # On dev only the newest commit matters.
+  cancel-in-progress: ${{ github.ref == 'refs/heads/dev' }}
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Tags and platforms
+        id: plan
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${OWNER,,}/ingetrazo"
+          sha="${GITHUB_SHA::7}"
+          platforms=linux/amd64
+          if [[ $REF_TYPE == tag ]]; then
+            v="${REF_NAME#v}"
+            if [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+              tags=("$v" rc)
+            elif [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              tags=("$v" "${v%.*}" stable latest)
+            else
+              echo "::error::tag $REF_NAME is neither vX.Y.Z nor vX.Y.Z-rc.N"; exit 1
+            fi
+            platforms=linux/amd64,linux/arm64
+            version="$REF_NAME"
+          elif [[ $REF_NAME == dev ]]; then
+            tags=(dev "dev-$sha")
+            version="dev-$sha"
+          elif [[ $REF_NAME == main || $REF_NAME == release/* ]]; then
+            echo "::error::main and release/* are published through their tags"; exit 1
+          else
+            b=$(printf %s "$REF_NAME" | tr 'A-Z/' 'a-z-' | tr -c 'a-z0-9.-' '-' | cut -c1-100)
+            tags=("br-$b")
+            version="br-$b-$sha"
+          fi
+          {
+            echo "platforms=$platforms"
+            echo "version=$version"
+            echo "image=$image"
+            echo "tags<<EOF"
+            for t in "${tags[@]}"; do echo "$image:$t"; done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          printf 'Tags:\n'; printf '  %s\n' "${tags[@]}"
+
+      - name: IngeTrazo ref baked into the image
+        id: ref
+        run: |
+          echo "repo=$(sed -n 's/^ARG INGETRAZO_REPO=//p' Dockerfile)" >> "$GITHUB_OUTPUT"
+          echo "ref=$(sed -n 's/^ARG INGETRAZO_REF=//p' Dockerfile)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+        if: contains(steps.plan.outputs.platforms, 'arm64')
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only for the OCI labels and annotations; the tags come from "plan".
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.plan.outputs.image }}
+          labels: |
+            org.opencontainers.image.title=IngeTrazo (headless)
+            org.opencontainers.image.description=IngeTrazo headless: MCP over HTTP and a live sheet/view viewer
+            org.opencontainers.image.licenses=GPL-3.0-or-later
+            org.opencontainers.image.version=${{ steps.plan.outputs.version }}
+            io.github.ingetrazo.repo=${{ steps.ref.outputs.repo }}
+            io.github.ingetrazo.ref=${{ steps.ref.outputs.ref }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ steps.plan.outputs.platforms }}
+          push: true
+          tags: ${{ steps.plan.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          build-args: |
+            INGETRAZO_DOCKER_REF=${{ steps.plan.outputs.version }}
+          cache-from: |
+            type=gha,scope=amd64
+            type=gha,scope=release
+          cache-to: ${{ contains(steps.plan.outputs.platforms, 'arm64') && 'type=gha,scope=release,mode=max' || 'type=gha,scope=amd64,mode=max' }}
+          provenance: true
+          sbom: ${{ contains(steps.plan.outputs.platforms, 'arm64') }}
+
+      - name: Summary
+        env:
+          TAGS: ${{ steps.plan.outputs.tags }}
+        run: |
+          { echo "### Published"; echo; echo '```'; echo "$TAGS"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

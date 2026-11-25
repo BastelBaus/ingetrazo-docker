@@ -1,0 +1,59 @@
+# PR titles in Conventional Commits form (they become the release notes and
+# the squash commit), and labels by changed paths and by title type.
+# pull_request_target: runs with the base branch's workflow and a token that
+# can label PRs from forks too. It never checks out the PR's code.
+name: PR hygiene
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  title:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            test
+            ci
+            build
+            chore
+            revert
+          requireScope: false
+
+  labels:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/labeler@v5
+        with:
+          sync-labels: false
+
+      - name: Label by title type
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: ${{ github.event.pull_request.title }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          labels=()
+          case "$TITLE" in
+            feat*) labels+=(enhancement) ;;
+            fix*|perf*) labels+=(bug) ;;
+            docs*) labels+=(documentation) ;;
+            *) labels+=(maintenance) ;;
+          esac
+          if [[ $TITLE =~ ^[a-z]+(\([^\)]*\))?!: ]]; then labels+=(breaking); fi
+          for l in "${labels[@]}"; do gh pr edit "$PR" --add-label "$l"; done
