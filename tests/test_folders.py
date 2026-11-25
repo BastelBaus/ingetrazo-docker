@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests of the model folders (no container needed):
 
     python -m unittest discover -s tests -p "test_*.py"

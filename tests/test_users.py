@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests of the user list (mcp_http/users.py) and the viewer's login,
 admin panel and account page (no container needed):
 

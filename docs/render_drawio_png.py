@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Render docs/architecture.drawio to an editable docs/architecture.drawio.png.
 
 The PNG carries the diagram the way draw.io writes it (a ``tEXt`` chunk

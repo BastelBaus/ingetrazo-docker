@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Which folders a user may see and write: their shares.
 
 A share is a path in the data folder – a model folder (``projects``) or

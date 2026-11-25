@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """IngeTrazo's own stdio MCP server, used as a library.
 
 Nothing of the MCP protocol or the tool list is re-implemented here: the

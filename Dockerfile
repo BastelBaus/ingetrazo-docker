@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # IngeTrazo, headless, in a container: the app from a git ref on GitHub
 # (unchanged), an X server in memory for its OpenGL context (Mesa llvmpipe),

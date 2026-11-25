@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """The viewer's own settings, changed by an admin at ``/admin`` and kept in
 ``<state>/site.json``: for now the title (the headline of the overview, the
 login page and the browser tab). ``VIEWER_TITLE`` is the default an admin's
