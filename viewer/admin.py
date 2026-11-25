@@ -44,6 +44,12 @@ CSS = """
 .panel .token{font-family:ui-monospace,monospace;font-size:13px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px;overflow-wrap:anywhere;user-select:all}
 .panel .stack{display:flex;flex-direction:column;gap:10px;max-width:360px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
 .panel .stack label{font-size:13px;color:var(--muted)}
+.panel .add textarea{flex:1 1 100%;min-height:4.5em;border:1px solid var(--line);background:var(--bg);color:var(--fg);padding:6px 8px;border-radius:6px;font:13px ui-monospace,monospace}
+.panel .add label{font-size:13px;color:var(--muted);flex:1 1 100%}
+.panel details.help{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:12px 0;font-size:14px}
+.panel details.help summary{cursor:pointer;font-weight:600}
+.panel details.help code,.panel td code,.panel .add code,.panel .note code{font-family:ui-monospace,monospace;font-size:12.5px;background:var(--bg);border:1px solid var(--line);border-radius:4px;padding:0 4px}
+.panel details.help table{margin:8px 0}
 @media (max-width:820px){.panel table,.panel tbody,.panel tr,.panel td{display:block;width:100%}
 .panel thead{display:none}.panel tr{border-bottom:1px solid var(--line)}.panel td{border:0;padding:4px 10px}}
 """
@@ -148,10 +154,20 @@ def page(auth, user, note: str = "", error: str = "", title: str = "") -> bytes:
                + " and appear here after their first login."
                + (f" Members of the group {escape(auth.admin_group)!s} are admins." if by_group else "")
                + "</p>")
+    from . import site
+    site_form = ('<h2>Title</h2><form class="add" method="post" action="/admin">'
+                 f'<input type="hidden" name="csrf" value="{auth.sessions.csrf(user.name)}">'
+                 '<input type="hidden" name="action" value="title">'
+                 f'<input name="title" value="{escape(site.title())}" maxlength="{site.MAX_TITLE}" '
+                 f'placeholder="{escape(site.DEFAULT_TITLE)}" aria-label="Title" style="min-width:18em">'
+                 '<button class="primary">Save</button>'
+                 '<button name="reset" value="1">Default</button></form>'
+                 '<p class="muted">The headline of the overview and the login page. '
+                 f'Default: {escape(site.DEFAULT_TITLE)} (<code>VIEWER_TITLE</code>).</p>')
     body = (_messages(note, error)
             + '<h2>Users</h2><table><thead><tr><th>User</th><th>Role</th><th>Login</th>'
             '<th>Last login</th><th></th></tr></thead><tbody>' + "".join(rows)
-            + "</tbody></table>" + add)
+            + "</tbody></table>" + add + site_form)
     return _wrap("Users", body, user, title)
 
 
@@ -164,6 +180,10 @@ def act(auth, user, form: dict) -> tuple[str, str]:
     me = name.lower() == user.name.lower()
     users = auth.users
     try:
+        if action == "title":
+            from . import site
+            now = site.set_title("" if get("reset") == "1" else get("title"))
+            return f"The title is now {now}.", ""
         if action == "create":
             if auth.mode != "local":
                 raise UserError("users of a provider or proxy appear after their first login")
@@ -201,9 +221,10 @@ def act(auth, user, form: dict) -> tuple[str, str]:
             for key, vals in form.items():
                 if key.startswith("s:") and vals[0] in share_mod.ACCESS:
                     chosen.append({"path": key[2:] or share_mod.ALL, "access": vals[0]})
-            extra = get("add_path").strip()
-            if extra:
-                chosen.append({"path": extra, "access": get("add_access") or "r"})
+            try:
+                chosen += share_mod.parse(get("rules"))
+            except ValueError as exc:
+                raise UserError(f"in the new lines: {exc}") from None
             users.set_shares(name, chosen)
             return f"Folders of {name} saved.", ""
         if action == "delete":
@@ -218,11 +239,49 @@ def act(auth, user, form: dict) -> tuple[str, str]:
 
 ACCESS_NAMES = {"": "–", "none": "No access", "r": "Read", "rw": "Read & write"}
 
+#: Tooltips of the access choices.
+ACCESS_TIPS = {
+    "": "No setting here: the folder above (or a pattern) decides",
+    "none": "Hide it: the user does not see these models, even if a wider share allows them",
+    "r": "The user sees the models in the viewer and can open them over MCP",
+    "rw": "Like Read, and over MCP the user may also save and export here "
+          "(a read-only model folder stays read-only)",
+}
+
+#: The help on the folders page (the README says the same under "Users").
+SHARES_HELP = """
+<details class="help"><summary>How folder access works</summary>
+<p>Each line below is a <em>share</em>: a folder, a single model or a pattern, with an access:
+<strong>Read</strong>, <strong>Read &amp; write</strong> (also save and export over MCP) or
+<strong>No access</strong>. A share covers its folder and everything inside it.</p>
+<p><strong>The most specific share wins</strong>: the one that starts to cover a model at the
+deepest folder level. <code>projects:r</code> with <code>projects/secret:none</code> hides
+<code>projects/secret</code> and shows the rest of <code>projects</code>. On the same level a
+plain folder beats a pattern, and of two patterns the one with less access wins. Without any
+share the user sees nothing. Read-only model folders stay read-only. Admins see everything.</p>
+<p><strong>Patterns</strong> include or exclude many folders and files at once. They are paths
+from the data folder, like the folders in the tree:</p>
+<table><tbody>
+<tr><td><code>*</code></td><td>any name within one folder level (alone: every folder)</td></tr>
+<tr><td><code>?</code></td><td>one character</td></tr>
+<tr><td><code>**</code></td><td>any number of folders, also none</td></tr>
+<tr><td><code>**/private:none</code></td><td>every folder named <em>private</em>, at any depth</td></tr>
+<tr><td><code>projects/*/plans:r</code></td><td>the <em>plans</em> folder of each project</td></tr>
+<tr><td><code>**/*.bak.igz:none</code></td><td>backup copies, wherever they are</td></tr>
+<tr><td><code>archive/20??/**:r</code></td><td>everything in <em>archive/2000</em> … <em>archive/2099</em></td></tr>
+</tbody></table>
+<p>Example: only the public part of every project: <code>*:none</code> and
+<code>projects/*/public:r</code>. <em>Check a path</em> at the bottom shows which share decides
+for a folder or model.</p>
+</details>
+"""
+
 
 def shares_page(auth, user, name: str, note: str = "", error: str = "",
-                title: str = "") -> bytes:
+                title: str = "", check: str = "") -> bytes:
     """One user's folders, for an admin: each model folder and the folders
-    in it, with what the user may do there."""
+    in it and the patterns, with what the user may do there; and a check
+    of one path (which share decides)."""
     acc = auth.users.get(name)
     if acc is None:
         return _wrap("Folders", _messages("", f"There is no user {name}."), user, title)
@@ -231,44 +290,113 @@ def shares_page(auth, user, name: str, note: str = "", error: str = "",
     current = own if not using_default else {
         s["path"]: s["access"] for s in share_mod.defaults()}
     paths = [share_mod.ALL] + share_mod.tree()
-    paths += [p for p in current if p not in paths]
+    paths += [p for p in current if p not in paths and not share_mod.is_pattern(p)]
+    patterns = [p for p in current if share_mod.is_pattern(p)]
+
+    def select(path: str, label: str) -> str:
+        here = current.get(path, "")
+        opts = "".join(f'<option value="{v}" title="{escape(ACCESS_TIPS[v])}"'
+                       f'{" selected" if v == here else ""}>{escape(t)}</option>'
+                       for v, t in ACCESS_NAMES.items())
+        return (f'<select name="s:{escape(path)}" aria-label="Access to {escape(label)}" '
+                'title="What this share gives; “–” removes it">' + opts + '</select>')
+
     rows = []
     for path in paths:
         depth = 0 if path in (share_mod.ALL, "") else path.count("/") + 1
         label = "All folders" if path == share_mod.ALL else (path.rsplit("/", 1)[-1] or "data")
-        here = current.get(path, "")
-        opts = "".join(f'<option value="{v}"{" selected" if v == here else ""}>{escape(t)}</option>'
-                       for v, t in ACCESS_NAMES.items())
-        got = share_mod.effective(acc, "*" if path in (share_mod.ALL, "") else path) \
-            if not acc.admin else "rw"
-        rows.append(f'<tr><td style="padding-left:{10 + depth * 18}px" title="{escape(path)}">'
-                    f'{escape(label)}</td><td><select name="s:{escape(path)}" '
-                    f'aria-label="Access to {escape(label)}">{opts}</select></td>'
+        tip = "Every folder (*)" if path == share_mod.ALL else path
+        if acc.admin:
+            got = "rw"
+        elif path == share_mod.ALL:          # not a folder: what the share itself gives
+            got = share_mod.access(share_mod.own_shares(acc), share_mod.ALL)
+        else:
+            got = share_mod.effective(acc, path or "*")
+        rows.append(f'<tr><td style="padding-left:{10 + depth * 18}px" title="{escape(tip)}">'
+                    f'{escape(label)}</td><td>{select(path, label)}</td>'
                     f'<td class="muted">{escape(ACCESS_NAMES[got])}</td></tr>')
+    pattern_rows = "".join(
+        f'<tr><td title="A pattern: it covers every folder and model it matches">'
+        f'<code>{escape(p)}</code></td><td>{select(p, p)}</td></tr>' for p in patterns)
     csrf = auth.sessions.csrf(user.name)
     body = (_messages(note, error)
             + f'<p>What <strong>{escape(acc.name)}</strong> may see (and, through MCP, write). '
             '“–” takes what the folder above says; the most specific setting wins. '
             'Read-only model folders stay read-only.</p>'
+            + SHARES_HELP
             + ('<p class="muted">Now: the default for every user (DEFAULT_SHARES). '
                'Saving below gives this user their own.</p>' if using_default else "")
+            + (f'<p class="muted">{escape(acc.name)} is an admin: admins see and write '
+               'everything, whatever is set here.</p>' if acc.admin else "")
             + '<form method="post" action="/admin">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             '<input type="hidden" name="action" value="shares">'
             f'<input type="hidden" name="name" value="{escape(acc.name)}">'
-            '<table><thead><tr><th>Folder</th><th>Share</th><th>Result</th></tr></thead><tbody>'
+            '<table><thead><tr>'
+            '<th title="The model folders and the folders in them">Folder</th>'
+            '<th title="The access set for this folder; “–”: nothing set here">Share</th>'
+            '<th title="What the user gets in this folder itself, after every share, '
+            'pattern and the model folder\'s mode">Result</th></tr></thead><tbody>'
             + "".join(rows) + '</tbody></table>'
-            '<div class="add" style="margin-top:12px"><input name="add_path" placeholder="Another folder, e.g. projects/2026/x" '
-            'aria-label="Another folder">'
-            '<select name="add_access" aria-label="Access"><option value="r">Read</option>'
-            '<option value="rw">Read &amp; write</option><option value="none">No access</option></select>'
-            '<span class="spacer"></span><button class="primary">Save</button></div></form>'
+            + ('<h2 title="Shares that match many folders or models at once">Patterns</h2>'
+               '<table><thead><tr><th>Pattern</th><th>Share</th></tr></thead><tbody>'
+               + pattern_rows + '</tbody></table>' if patterns else "")
+            + '<div class="add" style="margin-top:12px">'
+            '<label for="rules">More shares, one per line: <code>folder-or-pattern:access</code> '
+            'with <code>r</code>, <code>rw</code> or <code>none</code> (see the help above)</label>'
+            '<textarea id="rules" name="rules" spellcheck="false" '
+            'placeholder="projects/2026/x:rw&#10;**/private:none&#10;**/*.bak.igz:none" '
+            'title="A folder (projects/2026), a model (projects/a.igz) or a pattern with *, ? '
+            'or **, then : and r, rw or none. Without an access: r."></textarea>'
+            '<span class="spacer"></span><button class="primary" '
+            'title="Save the shares above and the new lines">Save</button></div></form>'
             + ("" if using_default else
                _form(auth, user, "shares", acc.name,
                      '<input type="hidden" name="default" value="1">'
-                     '<button>Back to the default</button>'))
+                     '<button title="Forget this user’s own shares; DEFAULT_SHARES applies '
+                     'again">Back to the default</button>'))
+            + _check_form(acc, check)
             + '<p><a href="/admin">← All users</a></p>')
     return _wrap(f"Folders of {acc.name}", body, user, title)
+
+
+def explain(acc, path: str) -> tuple[str, str]:
+    """What ``acc`` gets on ``path`` and why, as (access, reason in HTML)."""
+    got = share_mod.effective(acc, path)
+    if acc.admin:
+        return got, "they are an admin" + (
+            ", capped by the read-only model folder" if got == "r" else "")
+    wanted, rule = share_mod.decide(share_mod.own_shares(acc), path)
+    if rule is None:
+        why = "no share covers it"
+    else:
+        why = (f'of the share <code>{escape(rule["path"])}:{escape(rule["access"])}</code>'
+               + (" (a pattern)" if share_mod.is_pattern(rule["path"]) else ""))
+        if acc.shares is None:
+            why += " from DEFAULT_SHARES"
+    if got != wanted:
+        folder = share_mod.folders.folder_of((share_mod.folders.DATA_DIR / path).resolve())
+        why += (", capped by the read-only model folder" if folder is not None
+                else ", but it is not in a model folder")
+    return got, why
+
+
+def _check_form(acc, check: str) -> str:
+    """Check a path: what the user gets there and which share decides."""
+    check = check.strip().replace("\\", "/").strip("/")
+    answer = ""
+    if check:
+        got, why = explain(acc, check)
+        answer = (f'<p class="note"><code>{escape(check)}</code>: '
+                  f'<strong>{escape(ACCESS_NAMES[got])}</strong>, because {why}.</p>')
+    return ('<h2 title="Which share decides for one folder or model">Check a path</h2>'
+            '<form class="add" method="get" action="/admin/shares">'
+            f'<input type="hidden" name="name" value="{escape(acc.name)}">'
+            f'<input name="check" value="{escape(check)}" style="flex:1 1 260px" '
+            'placeholder="projects/2026/house.igz" aria-label="Path to check" '
+            'title="A folder or model, as a path from the data folder"> '
+            '<button title="Show what the user gets there and which share decides">Check</button>'
+            '</form>' + answer)
 
 
 #: How the account page names the settings and their values.
