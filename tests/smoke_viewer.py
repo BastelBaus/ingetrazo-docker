@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Smoke test of the viewer: smoke_viewer.py <base-url> <user> <password>
 
 Runs after smoke_mcp.py, which saved smoke-saved.igz into the shared data

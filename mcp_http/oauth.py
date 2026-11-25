@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """A minimal OAuth 2.1 authorisation server for ``MCP_AUTH=oauth``.
 
 Enough for remote MCP connectors such as claude.ai, and for the MCP

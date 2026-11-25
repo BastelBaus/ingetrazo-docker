@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """The users of the container, in one SQLite file (``USERS_DB``, default
 ``/state/users.db``). compose.yaml puts it on a volume both services
 mount, so the viewer and the MCP server share one list.

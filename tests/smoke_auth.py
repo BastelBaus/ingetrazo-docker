@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Smoke test of the viewer's VIEWER_AUTH_MODE settings.
 
     smoke_auth.py none            <viewer-url>

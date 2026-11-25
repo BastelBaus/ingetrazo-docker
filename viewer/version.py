@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Which build is running: this repo's version (``INGETRAZO_DOCKER_VERSION``,
 baked in from the build arg ``INGETRAZO_DOCKER_REF``) and the IngeTrazo
 inside (``core/version.py`` and the commit the Dockerfile wrote to
