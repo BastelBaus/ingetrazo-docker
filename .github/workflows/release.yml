@@ -72,6 +72,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            INGETRAZO_DOCKER_REF=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
           annotations: ${{ steps.meta.outputs.annotations }}
           cache-from: |
             type=gha,scope=amd64

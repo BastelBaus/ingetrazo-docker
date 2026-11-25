@@ -128,6 +128,7 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `XVFB_SCREEN` | `2560x1600x24` | Virtual screen of the in-memory X server; smaller = less memory |
 | `INGETRAZO_IMAGE` | `ghcr.io/bastelbaus/ingetrazo:latest` | Image to pull (or tag to build) |
 | `INGETRAZO_REPO` / `INGETRAZO_REF` | fork / pinned commit | Which IngeTrazo to build |
+| `INGETRAZO_DOCKER_REF` | `dev` | This repo's tag or commit for a local build; shown in the viewer's footer and at `/version` |
 
 ## How it works
 
