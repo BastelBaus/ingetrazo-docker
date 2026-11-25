@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Who may see the viewer: ``VIEWER_AUTH_MODE`` (or ``AUTH_MODE``).
 
-- ``local`` (default) – the built-in login: one user, ``VIEWER_USER`` /
-  ``VIEWER_PASSWORD``. A login page and a session cookie for browsers,
-  Basic auth for scripts. Without a password the viewer does not start.
+- ``local`` (default) – the built-in login: the users of the user list
+  (mcp_http/users.py) with a password, managed by admins at ``/admin``.
+  ``VIEWER_USER`` / ``VIEWER_PASSWORD`` make the first admin while there is
+  none. A login page and a session cookie for browsers, Basic auth for
+  scripts. Without any admin and without a password the viewer does not
+  start.
 - ``none``   – no login at all, on purpose; a warning in the log.
 - ``oidc``   – OpenID Connect (Authentik, Keycloak, …): authorisation code
   flow with PKCE, then the viewer's own session cookie.
@@ -11,10 +14,11 @@
   Authentik) has logged the user in and names them in a header; only
   requests from ``PROXY_TRUSTED_IPS`` are believed.
 
-``oidc`` and ``proxy`` keep a list of who logged in (``/state/users.json``):
-a user is added on first login, with the role ``admin`` when in the admin
-group, else ``viewer``. The viewer is read-only, so today both roles see
-the same; the role is shown and kept for what may come.
+``oidc`` and ``proxy`` add a user to the user list on first login, as
+``user``; with an admin group set (``OIDC_ADMIN_GROUP`` /
+``PROXY_ADMIN_GROUP``) the group decides who is ``admin``, else the admin
+panel does. An admin may switch a user off there. Every request checks the
+list, so that takes effect at once.
 
 The ID token comes straight from the provider's token endpoint over TLS,
 with the client secret, so its signature is not checked (OpenID Connect
@@ -32,12 +36,12 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from mcp_http.appbridge import log
+from mcp_http.users import Account, Users
 
 MODES = ("local", "none", "oidc", "proxy")
 STATE_DIR = Path(os.environ.get("INGETRAZO_STATE", "/state"))
@@ -62,7 +66,16 @@ def _unb64(text: str) -> bytes:
 @dataclass(frozen=True)
 class User:
     name: str
-    role: str = "viewer"          # "admin" or "viewer"
+    role: str = "user"            # "admin" or "user"
+    source: str = "local"
+
+    @property
+    def admin(self) -> bool:
+        return self.role == "admin"
+
+    @classmethod
+    def of(cls, acc: Account) -> "User":
+        return cls(acc.name, acc.role, acc.source)
 
 
 class Sessions:
@@ -91,45 +104,11 @@ class Sessions:
             return None
         if not isinstance(data, dict) or int(data.get("e", 0)) < time.time():
             return None
-        return User(str(data.get("u", "")), str(data.get("r", "viewer")))
+        return User(str(data.get("u", "")), str(data.get("r", "user")))
 
-
-class UserStore:
-    """Who logged in through ``oidc`` or ``proxy``, in ``users.json``."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.lock = threading.Lock()
-        self.seen: dict[str, float] = {}
-        try:
-            self.users = json.loads(path.read_text("utf-8"))
-        except (OSError, ValueError):
-            self.users = {}
-
-    def record(self, name: str, role: str, groups: list[str], source: str) -> None:
-        now = time.time()
-        with self.lock:
-            known = self.users.get(name)
-            # A proxy names the user on every request: write at most every
-            # ten minutes per user, and at once when something changed.
-            if (known and known.get("role") == role
-                    and known.get("groups") == groups
-                    and now - self.seen.get(name, 0) < 600):
-                return
-            stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            if known is None:
-                log(f"viewer: new user {name!r} ({role}, via {source})")
-                known = {"first_login": stamp}
-            known.update(role=role, groups=groups, source=source, last_login=stamp)
-            self.users[name] = known
-            self.seen[name] = now
-            try:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = self.path.with_suffix(".part")
-                tmp.write_text(json.dumps(self.users, indent=1, ensure_ascii=False), "utf-8")
-                tmp.replace(self.path)
-            except OSError as exc:
-                log(f"viewer: cannot write {self.path}: {exc}")
+    def csrf(self, name: str) -> str:
+        """The token a form of this user's pages carries (admin, account)."""
+        return hmac.new(self.key, b"csrf:" + name.encode(), hashlib.sha256).hexdigest()[:32]
 
 
 class OIDC:
@@ -208,9 +187,9 @@ class OIDC:
             "state": state, "nonce": nonce,
             "code_challenge": challenge, "code_challenge_method": "S256"})
 
-    def finish(self, code: str, state: str) -> tuple[User, list[str], str]:
-        """The callback: (user, groups, where to go next). ValueError when
-        anything does not add up."""
+    def finish(self, code: str, state: str) -> tuple[str, list[str], str]:
+        """The callback: (user name, groups, where to go next). ValueError
+        when anything does not add up."""
         with self._lock:
             pending = self._pending.pop(state, None)
         if pending is None or pending["t"] < time.time() - 600:
@@ -240,8 +219,7 @@ class OIDC:
             raise ValueError("the provider named no user")
         groups = claims.get(self.groups_claim) or []
         groups = [str(g) for g in groups] if isinstance(groups, list) else [str(groups)]
-        role = "admin" if self.admin_group and self.admin_group in groups else "viewer"
-        return User(name, role), groups, pending["next"]
+        return name, groups, pending["next"]
 
     def _id_claims(self, token: str, nonce: str) -> dict:
         parts = token.split(".")
@@ -300,7 +278,7 @@ class Proxy:
             ip = ip.ipv4_mapped
         return any(ip in net for net in self.trusted)
 
-    def user(self, addr: str, headers) -> tuple[User, list[str]] | None:
+    def user(self, addr: str, headers) -> tuple[str, list[str]] | None:
         if not self.trusts(addr):
             return None
         name = (headers.get(self.user_header) or "").strip()
@@ -311,8 +289,7 @@ class Proxy:
             raw = headers.get(self.groups_header) or ""
             sep = "|" if "|" in raw else ","        # Authentik joins with "|"
             groups = [g.strip() for g in raw.split(sep) if g.strip()]
-        role = "admin" if self.admin_group and self.admin_group in groups else "viewer"
-        return User(name, role), groups
+        return name, groups
 
 
 class Auth:
@@ -324,16 +301,22 @@ class Auth:
                              f"not {raw!r}")
         self.sessions = Sessions(int(_env("VIEWER_SESSION_DAYS") or 30))
         self.user_name = _env("VIEWER_USER") or "viewer"
-        self.password = os.environ.get("VIEWER_PASSWORD", "")
+        password = os.environ.get("VIEWER_PASSWORD", "")
         self.oidc = OIDC() if self.mode == "oidc" else None
         self.proxy = Proxy() if self.mode == "proxy" else None
-        self.users = (UserStore(STATE_DIR / "users.json")
-                      if self.mode in ("oidc", "proxy") else None)
-        if self.mode == "local" and not self.password:
-            raise SystemExit(
-                "the viewer's login (VIEWER_AUTH_MODE=local, the default) needs "
-                "VIEWER_PASSWORD. For a viewer without any login, say so: "
-                "VIEWER_AUTH_MODE=none")
+        self.users = Users() if self.mode != "none" else None
+        if self.users is not None:
+            added = self.users.import_json(STATE_DIR / "users.json")
+            if added:
+                log(f"viewer: {added} user(s) taken over from users.json")
+        if self.mode == "local":
+            if password and self.users.ensure_admin(self.user_name, password):
+                log(f"viewer: first admin {self.user_name!r} from VIEWER_USER / VIEWER_PASSWORD")
+            if not self.users.active_admins():
+                raise SystemExit(
+                    "the viewer's login (VIEWER_AUTH_MODE=local, the default) needs "
+                    "VIEWER_PASSWORD for its first admin. For a viewer without any "
+                    "login, say so: VIEWER_AUTH_MODE=none")
         if self.mode == "none":
             log("WARNING: VIEWER_AUTH_MODE=none — anyone who reaches the viewer "
                 "sees every model in the data folder. Use it only on a trusted "
@@ -347,19 +330,46 @@ class Auth:
                     + ", ".join(str(n) for n in self.proxy.trusted))
         return self.mode
 
-    def credentials_ok(self, user: str, pw: str) -> bool:
-        return (self.mode == "local"
-                and hmac.compare_digest(user.encode(), self.user_name.encode())
-                & hmac.compare_digest(pw.encode(), self.password.encode()))
+    @property
+    def admin_group(self) -> str:
+        return (self.oidc.admin_group if self.oidc else
+                self.proxy.admin_group if self.proxy else "")
+
+    def login(self, name: str, pw: str) -> User | None:
+        """``local``: the user whose password this is."""
+        if self.mode != "local":
+            return None
+        acc = self.users.authenticate(name, pw)
+        return User.of(acc) if acc else None
+
+    def current(self, user: User) -> User | None:
+        """A session's user as the list has them now: None when removed or
+        switched off, with the role they have now."""
+        if self.users is None:
+            return user
+        acc = self.users.get(user.name)
+        return User.of(acc) if acc and acc.active else None
+
+    def disabled(self, name: str) -> bool:
+        acc = self.users.get(name) if self.users is not None and name else None
+        return bool(acc and not acc.active)
+
+    def _seen(self, name: str, groups: list[str], source: str) -> User | None:
+        group = self.admin_group
+        acc = self.users.seen(name, source, groups,
+                              (group in groups) if group else None)
+        if acc.source != source:
+            log(f"viewer: {name!r} came through {source} but is a {acc.source} user; refused")
+            return None
+        return User.of(acc) if acc.active else None
 
     def from_proxy(self, addr: str, headers) -> User | None:
         found = self.proxy.user(addr, headers)
         if found is None:
             return None
-        user, groups = found
-        self.users.record(user.name, user.role, groups, "proxy")
-        return user
+        return self._seen(*found, "proxy")
 
-    def logged_in(self, user: User, groups: list[str]) -> None:
-        if self.users is not None:
-            self.users.record(user.name, user.role, groups, self.mode)
+    def logged_in(self, name: str, groups: list[str]) -> User | None:
+        """``oidc``: the user the provider named, recorded; None when an
+        admin switched them off."""
+        return self._seen(name, groups, "oidc")

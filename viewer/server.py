@@ -9,6 +9,7 @@ one model, one sheet or view at a time (``?sheet=N`` / ``?view=N``,
 ``/files/<slug>/<rev>/<f>`` rendered images, PDF and GLB, ``/static/<f>``
 the 3D view's script library (three.js), ``/events`` server-sent events
 (a listing or render started or finished),
+``/admin`` the user list (admins), ``/account`` one's own account,
 ``/healthz`` (always open). Who may see the rest: ``VIEWER_AUTH_MODE``
 (see auth.py) — ``local`` (``/login``, ``/logout``, Basic auth for
 scripts), ``none``, ``oidc`` (``/auth/login``, ``/auth/callback``) or
@@ -17,6 +18,7 @@ scripts), ``none``, ``oidc`` (``/auth/login``, ``/auth/callback``) or
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import os
 import re
@@ -31,6 +33,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit
 from mcp_http import folders
 from mcp_http.appbridge import App, log
 
+from . import admin
 from .auth import Auth, User
 from .render import (CACHE_DIR, GLB_MAX_MB, NEXT, NOW, POLL, PRERENDER, PREVIEW,
                      WITH_PDF, Renderer)
@@ -265,16 +268,17 @@ JS = """
 
 
 def _account(user: User | None) -> str:
-    """The top bar's right end: who is logged in, and the way out."""
+    """The top bar's right end: who is logged in (their own page), the
+    admin panel for admins, and the way out."""
     if user is None or auth.mode == "none":
         return ""
-    who = ""
-    if auth.mode in ("oidc", "proxy"):
-        role = " (admin)" if user.role == "admin" else ""
-        who = f'<span class="muted who" title="{escape(user.name + role)}">{escape(user.name)}</span>'
+    role = " (admin)" if user.admin else ""
+    who = (f'<a class="muted who" href="/account" title="{escape(user.name + role)}">'
+           f'{escape(user.name)}</a>')
+    admin = '<a class="btn" href="/admin" title="Users">Users</a>' if user.admin else ""
     out = ('<a class="btn" href="/logout">Log out</a>'
            if auth.mode != "proxy" or auth.proxy.logout_url else "")
-    return who + out
+    return who + admin + out
 
 
 def _page(title: str, header: str, body: str, slug: str | None = None,
@@ -659,8 +663,8 @@ def login_page(error: str, nxt: str) -> bytes:
     err = f'<p class="err">{escape(error)}</p>' if error else ""
     return _card("Log in", f"""<form method="post" action="/login">{err}
 <input type="hidden" name="next" value="{escape(nxt)}">
-<label for="u">User</label><input id="u" name="user" autocomplete="username" value="{escape(auth.user_name)}">
-<label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" autofocus>
+<label for="u">User</label><input id="u" name="user" autocomplete="username" autofocus>
+<label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password">
 <button type="submit">Log in</button></form>""")
 
 
@@ -709,7 +713,7 @@ class Handler(BaseHTTPRequestHandler):
             user, _, pw = base64.b64decode(value[6:]).decode().partition(":")
         except ValueError:
             return None
-        return User(user, "admin") if auth.credentials_ok(user, pw) else None
+        return auth.login(user, pw)
 
     def _user(self) -> User | None:
         if auth.mode == "none":
@@ -717,9 +721,12 @@ class Handler(BaseHTTPRequestHandler):
         if auth.mode == "proxy":
             return auth.from_proxy(self.client_address[0], self.headers)
         user = self._cookie_user()
-        if user is None and auth.mode == "local":
-            user = self._basic_user()
-        return user
+        if user is not None:
+            # As the user list has them now (switched off, another role).
+            return auth.current(user)
+        if auth.mode == "local":
+            return self._basic_user()
+        return None
 
     def _authorised(self, path: str) -> User | None:
         user = self._user()
@@ -728,7 +735,15 @@ class Handler(BaseHTTPRequestHandler):
         wants_html = "text/html" in self.headers.get("Accept", "")
         page = wants_html and not path.startswith(("/files/", "/events"))
         target = self.path if self.path.startswith("/") else "/"
-        if auth.mode == "proxy":
+        if self._is_disabled():
+            if page:
+                self._html(403, message_page(
+                    "Your account is switched off. Ask an admin of this viewer.",
+                    "/logout" if auth.mode != "proxy" else "", "Log out"),
+                    {"Set-Cookie": f"{COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"})
+            else:
+                self._send(403, b"account switched off\n", "text/plain")
+        elif auth.mode == "proxy":
             if page:
                 self._html(401, message_page(
                     "This viewer is reached through its login proxy, which did "
@@ -747,6 +762,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send(401, b"authentication required\n", "text/plain")
         return None
 
+    def _is_disabled(self) -> bool:
+        """Whether whoever asks is a known user an admin switched off."""
+        if auth.mode == "proxy":
+            found = auth.proxy.user(self.client_address[0], self.headers)
+            return bool(found) and auth.disabled(found[0])
+        user = self._cookie_user()
+        return user is not None and auth.disabled(user.name)
+
     def _secure(self) -> bool:
         return (self.headers.get("X-Forwarded-Proto", "").lower() == "https"
                 or os.environ.get("VIEWER_COOKIE_SECURE", "").lower() in ("1", "true", "yes")
@@ -763,18 +786,44 @@ class Handler(BaseHTTPRequestHandler):
         return (f"{COOKIE}={auth.sessions.issue(user)}; Path=/; HttpOnly; SameSite=Lax; "
                 f"Max-Age={auth.sessions.max_age}" + ("; Secure" if self._secure() else ""))
 
+    def _form(self) -> dict:
+        length = min(int(self.headers.get("Content-Length") or 0), 16384)
+        return parse_qs(self.rfile.read(length).decode("utf-8", "replace"),
+                        keep_blank_values=True)
+
     def do_POST(self):
         path = urlsplit(self.path).path
-        if path != "/login" or auth.mode != "local":
-            return self._send(404, b"not found\n", "text/plain")
-        length = min(int(self.headers.get("Content-Length") or 0), 4096)
-        form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
-        user = (form.get("user") or [""])[0]
+        if path == "/login" and auth.mode == "local":
+            return self._post_login()
+        if path in ("/admin", "/account") and auth.mode != "none":
+            user = self._authorised(path)
+            if user is None:
+                return None
+            form = self._form()
+            if not hmac.compare_digest((form.get("csrf") or [""])[0],
+                                       auth.sessions.csrf(user.name)):
+                return self._html(403, message_page("The form expired; open it again.",
+                                                    path, "Back"))
+            if path == "/admin":
+                if not user.admin:
+                    return self._send(403, b"admins only\n", "text/plain")
+                note, error = admin.act(auth, user, form)
+                return self._html(400 if error else 200,
+                                  admin.page(auth, user, note, error, TITLE))
+            note, error = admin.act_account(auth, user, form)
+            return self._html(400 if error else 200,
+                              admin.account_page(auth, user, note, error, TITLE))
+        return self._send(404, b"not found\n", "text/plain")
+
+    def _post_login(self):
+        form = self._form()
+        name = (form.get("user") or [""])[0].strip()
         pw = (form.get("password") or [""])[0]
         nxt = _safe_next((form.get("next") or ["/"])[0])
-        if auth.credentials_ok(user, pw):
+        user = auth.login(name, pw)
+        if user is not None:
             return self._send(303, b"", "text/plain", {
-                "Location": nxt, "Set-Cookie": self._session_cookie(User(user, "admin"))})
+                "Location": nxt, "Set-Cookie": self._session_cookie(user)})
         time.sleep(0.7)                          # slows down guessing
         return self._login_page(401, "Wrong user name or password.", nxt)
 
@@ -820,14 +869,18 @@ class Handler(BaseHTTPRequestHandler):
             if query.get("error"):
                 raise ValueError(f"the provider said: {query['error'][0]} "
                                  + (query.get("error_description") or [""])[0])
-            user, groups, nxt = auth.oidc.finish((query.get("code") or [""])[0],
+            name, groups, nxt = auth.oidc.finish((query.get("code") or [""])[0],
                                                  (query.get("state") or [""])[0])
         except (OSError, ValueError) as exc:
             log(f"viewer: OIDC login failed: {exc}")
             self._html(502 if isinstance(exc, OSError) else 400, message_page(
                 f"The login did not work: {exc}", "/auth/login", "Try again"))
             return True
-        auth.logged_in(user, groups)
+        user = auth.logged_in(name, groups)
+        if user is None:
+            self._html(403, message_page(
+                "Your account is switched off. Ask an admin of this viewer."))
+            return True
         self._send(303, b"", "text/plain",
                    {"Location": _safe_next(nxt), "Set-Cookie": self._session_cookie(user)})
         return True
@@ -846,6 +899,12 @@ class Handler(BaseHTTPRequestHandler):
         nocache = {"Cache-Control": "no-store"}
         if path == "/":
             return self._send(200, overview(user), html, nocache)
+        if path == "/admin" and auth.mode != "none":
+            if not user.admin:
+                return self._html(403, message_page("Only admins manage the users.", "/", "Back"))
+            return self._html(200, admin.page(auth, user, title=TITLE))
+        if path == "/account" and auth.mode != "none":
+            return self._html(200, admin.account_page(auth, user, title=TITLE))
         if path.startswith("/m/"):
             slug = path[3:]
             query = parse_qs(parts.query)

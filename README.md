@@ -218,16 +218,32 @@ name (`sheet-003-120dpi.png`), so changing `VIEWER_SHEET_DPI` renders anew inste
 
 | Mode | Who gets in | Settings |
 |---|---|---|
-| `local` (default) | The one user `VIEWER_USER` with `VIEWER_PASSWORD`: a login page and a session cookie for browsers, Basic auth for scripts. Without a password the viewer does **not** start. | `VIEWER_USER`, `VIEWER_PASSWORD` |
+| `local` (default) | The users of the [user list](#users) with a password: a login page and a session cookie for browsers, Basic auth for scripts. `VIEWER_USER` / `VIEWER_PASSWORD` make the first admin. Without any admin and without a password the viewer does **not** start. | `VIEWER_USER`, `VIEWER_PASSWORD` |
 | `none` | Anyone who reaches the port, on purpose (a trusted network, a public showcase). A warning in the log; no Log out button. | – |
 | `oidc` | Users of an OpenID Connect provider (Authentik, Keycloak, …): authorization code flow with PKCE. | `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_REDIRECT_URI`; optional `OIDC_SCOPES`, `OIDC_ADMIN_GROUP`, `OIDC_USERNAME_CLAIM`, `OIDC_GROUPS_CLAIM` |
 | `proxy` | Users a reverse proxy with forward auth (Traefik or nginx with Authentik) has logged in; the proxy names them in a header. The header is believed only from `PROXY_TRUSTED_IPS`. | `PROXY_TRUSTED_IPS`; optional `PROXY_USER_HEADER` (default `X-authentik-username`), `PROXY_GROUPS_HEADER`, `PROXY_ADMIN_GROUP`, `PROXY_LOGOUT_URL` |
 
-With `oidc` and `proxy` a user is added to `/state/users.json` on first login, with the role `admin` when in the
-admin group, else `viewer`. The viewer is read-only, so both roles see the same today. There is no LDAP client in
-the container: user sources such as LDAP are configured in the identity provider.
+With `oidc` and `proxy` a user is added to the [user list](#users) on first login. There is no LDAP client in the
+container: user sources such as LDAP are configured in the identity provider.
 
 Sessions (`local`, `oidc`) last `VIEWER_SESSION_DAYS` (30) and end when the container restarts.
+
+### Users
+
+The users live in one SQLite file, `users.db`, on the volume `users` that both services mount (`USERS_DB`, default
+`/state/users.db`). Each user has a role, `admin` or `user`, and is switched on or off.
+
+- **Admins** manage the list at **`/admin`** (the *Users* button in the top bar): add local users (`local` mode), set
+  roles and passwords, switch users off and on, remove them. The list always keeps one active admin, and an admin
+  cannot switch themself off or remove themself.
+- **The first admin** comes from `VIEWER_USER` / `VIEWER_PASSWORD` while there is no active admin. After that the
+  list decides: changing `VIEWER_PASSWORD` later does nothing; change the password at `/account` or `/admin`.
+- **`oidc` and `proxy`**: a user is added on first login, as `user`. With `OIDC_ADMIN_GROUP` / `PROXY_ADMIN_GROUP`
+  set, that group decides who is admin; without it, the admin panel does. Passwords stay with the provider.
+- **Everyone** sees their account at `/account` (their name in the top bar); local users change their password there.
+
+Switching a user off or removing them ends their session at once. A viewer that kept users in `/state/users.json`
+takes them over on its first start.
 
 ### Authentik with OIDC
 
