@@ -148,10 +148,20 @@ def page(auth, user, note: str = "", error: str = "", title: str = "") -> bytes:
                + " and appear here after their first login."
                + (f" Members of the group {escape(auth.admin_group)!s} are admins." if by_group else "")
                + "</p>")
+    from . import site
+    site_form = ('<h2>Title</h2><form class="add" method="post" action="/admin">'
+                 f'<input type="hidden" name="csrf" value="{auth.sessions.csrf(user.name)}">'
+                 '<input type="hidden" name="action" value="title">'
+                 f'<input name="title" value="{escape(site.title())}" maxlength="{site.MAX_TITLE}" '
+                 f'placeholder="{escape(site.DEFAULT_TITLE)}" aria-label="Title" style="min-width:18em">'
+                 '<button class="primary">Save</button>'
+                 '<button name="reset" value="1">Default</button></form>'
+                 '<p class="muted">The headline of the overview and the login page. '
+                 f'Default: {escape(site.DEFAULT_TITLE)} (<code>VIEWER_TITLE</code>).</p>')
     body = (_messages(note, error)
             + '<h2>Users</h2><table><thead><tr><th>User</th><th>Role</th><th>Login</th>'
             '<th>Last login</th><th></th></tr></thead><tbody>' + "".join(rows)
-            + "</tbody></table>" + add)
+            + "</tbody></table>" + add + site_form)
     return _wrap("Users", body, user, title)
 
 
@@ -164,6 +174,10 @@ def act(auth, user, form: dict) -> tuple[str, str]:
     me = name.lower() == user.name.lower()
     users = auth.users
     try:
+        if action == "title":
+            from . import site
+            now = site.set_title("" if get("reset") == "1" else get("title"))
+            return f"The title is now {now}.", ""
         if action == "create":
             if auth.mode != "local":
                 raise UserError("users of a provider or proxy appear after their first login")

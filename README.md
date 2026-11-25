@@ -120,6 +120,7 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `VIEWER_GUEST` | `false` | `local` / `oidc`: a *Log in as guest* button on the login page (see [Users](#users)) |
 | `VIEWER_PASSWORD` | – | `local`: the password (user `VIEWER_USER`); login page for browsers, Basic auth for scripts |
 | `VIEWER_PRERENDER` | `previews` | What the viewer renders before anyone looks: `previews`, `none` or `all` (see [Rendering on demand](#rendering-on-demand)) |
+| `VIEWER_TITLE` | `IngeTrazo-docker` | The headline (overview, login page, browser tab); admins can change it at `/admin` → *Title* |
 | `VIEWER_SHEET_DPI` | `120` | Sheet image resolution |
 | `VIEWER_NAV_MODE` | `list` | How the View / 3D / Sheet dropdowns show folders by default: `list` (all levels) or `tree` (one level at a time); each user can switch (kept in their settings) |
 | `VIEWER_GLB_MAX_MB` | `50` | 3D view: a model whose GLB is bigger gets no 3D view (it is still rendered as sheets and views); `0` turns the 3D view off |

@@ -36,7 +36,7 @@ from mcp_http import folders, shares
 from mcp_http.appbridge import App, log
 from mcp_http.users import UserError
 
-from . import admin, avatar, version
+from . import admin, avatar, site, version
 from .auth import Auth, User
 from .render import (CACHE_DIR, GLB_MAX_MB, NEXT, NOW, POLL, PRERENDER, PREVIEW,
                      WITH_PDF, Renderer)
@@ -44,7 +44,6 @@ from .view3d import THREE_DIR, view3d
 
 renderer: Renderer
 auth: Auth
-TITLE = os.environ.get("VIEWER_TITLE", "IngeTrazo viewer")
 #: How the View / 3D / Sheet dropdowns show folders by default: "list"
 #: (every level at once) or "tree" (one level at a time). Each browser can
 #: switch in the dropdown.
@@ -359,6 +358,21 @@ def _folder(item: dict) -> list[str]:
     return [p for p in str(f or "").split("/") if p.strip()]
 
 
+def _natural(text: str) -> list:
+    """A sort key: case-insensitive, numbers by value ("View 2" < "View 10")."""
+    return [(0, int(t), "") if t.isdigit() else (1, 0, t)
+            for t in re.split(r"(\d+)", text.casefold()) if t]
+
+
+def _by_name(items: list[tuple[int, dict]]) -> list[tuple[int, dict]]:
+    """Saved views (index, view) by folder, then name, alphabetically; the
+    views outside any folder after those in folders, as the dropdown shows
+    them. The index stays the document's (``?view=N``)."""
+    return sorted(items, key=lambda iv: (not _folder(iv[1]),
+                                          [_natural(p) for p in _folder(iv[1])],
+                                          _natural(str(iv[1].get("name", "")))))
+
+
 def _path_json(path: list[str]) -> str:
     """A folder path as the browser's JSON.stringify writes it (compared as
     text by the tree's script)."""
@@ -437,9 +451,11 @@ def _dropdown_3d(idx: dict, current: str, query: dict) -> str:
     paths = {v["name"]: _folder(v) for v in idx.get("views", [])}
     entries = [("?3d=1", "Whole model", [])]
     attrs = {"?3d=1": ' data-cam="0"'}
-    for i, c in enumerate(idx.get("cameras") or []):
+    cams = [(i, {"name": str(c.get("name", "")), "folder": paths.get(c.get("name"), [])})
+            for i, c in enumerate(idx.get("cameras") or [])]
+    for i, c in _by_name(cams):
         link = f"?3d=1&cam={i + 1}"
-        entries.append((link, str(c.get("name", "")), paths.get(c.get("name"), [])))
+        entries.append((link, c["name"], c["folder"]))
         attrs[link] = f' data-cam="{i + 1}"'
     if current:
         raw = (query.get("cam") or [""])[0]
@@ -525,7 +541,7 @@ def overview(user: User | None = None) -> bytes:
             + (f'<div class="grid">{"".join(cards)}</div>' if cards
                else '<p class="muted">No models.</p>') + "</section>"
             for name, cards in groups.items())
-    return _page(TITLE, f"<h1>{escape(TITLE)}</h1>", body, user=user,
+    return _page(site.title(), f"<h1>{escape(site.title())}</h1>", body, user=user,
                  wait=["preview"])
 
 
@@ -547,7 +563,7 @@ def _pick(query: dict, sheets: list, views: list,
 
 
 def _opening(slug: str, user: User | None, text: str = "Opening the model…") -> bytes:
-    return _page(TITLE, '<a class="btn" href="/">← All models</a>',
+    return _page(site.title(), '<a class="btn" href="/">← All models</a>',
                  f'<p class="empty">{escape(text)} This page refreshes when it is done.</p>',
                  slug, user=user, wait=["list"])
 
@@ -572,16 +588,18 @@ def model_page(slug: str, user: User | None = None,
     sheets, views = idx.get("sheets", []), idx.get("views", [])
     has_3d = GLB_MAX_MB > 0 and not idx.get("errors")
     kind, pos = _pick(query or {}, sheets, views, has_3d)
-    # Every entry in the order Prev/Next walks: the sheets, then the views.
+    # Every entry in the order Prev/Next walks: the sheets in document
+    # order, then the views alphabetically.
+    sorted_views = _by_name(list(enumerate(views)))
     entries = ([("sheet", i, s) for i, s in enumerate(sheets)]
-               + [("view", i, v) for i, v in enumerate(views)])
+               + [("view", i, v) for i, v in sorted_views])
 
     def link(k: str, i: int) -> str:
         return f"?{k}={i + 1}"
 
     current = "?3d=1" if kind == "3d" else link(kind, pos)
     sheet_nav = [(link("sheet", i), s["name"], _folder(s)) for i, s in enumerate(sheets)]
-    view_nav = [(link("view", i), v["name"], _folder(v)) for i, v in enumerate(views)]
+    view_nav = [(link("view", i), v["name"], _folder(v)) for i, v in sorted_views]
 
     content = _problems(idx.get("errors") or [], "The model could not be opened:")
     step = prefetch = ""
@@ -662,7 +680,7 @@ def model_page(slug: str, user: User | None = None,
               f'<h1 title="{escape(idx["name"])}">{escape(idx["name"])}</h1>'
               + (f'<nav class="navs">{navs}</nav>' if navs else "") + step
               + f'<span class="spacer"></span><span class="meta">read {_when(idx)}</span>{pdf}')
-    return _page(f'{idx["name"]} – {TITLE}', header, prefetch + content, slug,
+    return _page(f'{idx["name"]} – {site.title()}', header, prefetch + content, slug,
                  bar=True, user=user, wait=wait)
 
 
@@ -680,13 +698,13 @@ def pdf_page(slug: str, user: User | None = None) -> tuple[bytes | None, str]:
         return None, _file_url(slug, idx["rev"], st["file"])
     back = f'<a class="btn" href="/m/{quote(slug)}">← {escape(idx["name"])}</a>'
     if not WITH_PDF or not idx.get("sheets"):
-        return _page(TITLE, back, '<p class="empty">There is no PDF of this model.</p>',
+        return _page(site.title(), back, '<p class="empty">There is no PDF of this model.</p>',
                      slug, user=user), ""
     if renderer.due(idx, "pdf"):
         renderer.request(slug, "pdf", NOW)
-        return _page(TITLE, back, _pending("Making the PDF of all sheets…"),
+        return _page(site.title(), back, _pending("Making the PDF of all sheets…"),
                      slug, user=user, wait=["pdf"]), ""
-    return _page(TITLE, back, _problems([st.get("error")], "The PDF could not be made:"),
+    return _page(site.title(), back, _problems([st.get("error")], "The PDF could not be made:"),
                  slug, user=user), ""
 
 
@@ -717,8 +735,8 @@ background:var(--accent);color:#fff;font:inherit;font-weight:600;cursor:pointer}
 def _card(title: str, inner: str) -> bytes:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{escape(title)} – {escape(TITLE)}</title><style>{CSS}{LOGIN_CSS}</style></head>
-<body><main><div class="login"><h1>{escape(TITLE)}</h1>{inner}</div></main></body></html>""".encode("utf-8")
+<title>{escape(title)} – {escape(site.title())}</title><style>{CSS}{LOGIN_CSS}</style></head>
+<body><main><div class="login"><h1>{escape(site.title())}</h1>{inner}</div></main></body></html>""".encode("utf-8")
 
 
 def _guest_button(nxt: str) -> str:
@@ -833,7 +851,7 @@ class Handler(BaseHTTPRequestHandler):
                        {"Location": where + "?next=" + quote(target, safe="")})
         elif auth.mode == "local":
             self._send(401, b"authentication required\n", "text/plain",
-                       {"WWW-Authenticate": f'Basic realm="{TITLE}", charset="UTF-8"'})
+                       {"WWW-Authenticate": f'Basic realm="{site.title()}", charset="UTF-8"'})
         else:
             self._send(401, b"authentication required\n", "text/plain")
         return None
@@ -895,12 +913,12 @@ class Handler(BaseHTTPRequestHandler):
                 note, error = admin.act(auth, user, form)
                 if (form.get("action") or [""])[0] == "shares":
                     return self._html(400 if error else 200, admin.shares_page(
-                        auth, user, (form.get("name") or [""])[0], note, error, TITLE))
+                        auth, user, (form.get("name") or [""])[0], note, error, site.title()))
                 return self._html(400 if error else 200,
-                                  admin.page(auth, user, note, error, TITLE))
+                                  admin.page(auth, user, note, error, site.title()))
             note, error = admin.act_account(auth, user, form)
             return self._html(400 if error else 200,
-                              admin.account_page(auth, user, note, error, TITLE))
+                              admin.account_page(auth, user, note, error, site.title()))
         return self._send(404, b"not found\n", "text/plain")
 
     def _post_settings(self):
@@ -1012,12 +1030,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/admin" and auth.mode != "none":
             if not user.admin:
                 return self._html(403, message_page("Only admins manage the users.", "/", "Back"))
-            return self._html(200, admin.page(auth, user, title=TITLE))
+            return self._html(200, admin.page(auth, user, title=site.title()))
         if path == "/admin/shares" and auth.mode != "none":
             if not user.admin:
                 return self._html(403, message_page("Only admins manage the users.", "/", "Back"))
             name = (parse_qs(parts.query).get("name") or [""])[0]
-            return self._html(200, admin.shares_page(auth, user, name, title=TITLE))
+            return self._html(200, admin.shares_page(auth, user, name, title=site.title()))
         if path.startswith("/avatar/") and path.endswith(".svg") and auth.mode != "none":
             from urllib.parse import unquote
             acc = auth.users.get(unquote(path[8:-4]))
@@ -1027,7 +1045,7 @@ class Handler(BaseHTTPRequestHandler):
                               "image/svg+xml", {"Cache-Control": "private, max-age=86400",
                                                 "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'"})
         if path == "/account" and auth.mode != "none":
-            return self._html(200, admin.account_page(auth, user, title=TITLE))
+            return self._html(200, admin.account_page(auth, user, title=site.title()))
         if path.startswith("/m/"):
             slug = path[3:]
             query = parse_qs(parts.query)
@@ -1147,4 +1165,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Run the package's copy: admin.py imports viewer.server, and a second
+    # copy of this file (as __main__) would hold auth and renderer while
+    # viewer.server's stay unset (NameError on /admin and /account).
+    from viewer import server as _server
+    _server.main()
