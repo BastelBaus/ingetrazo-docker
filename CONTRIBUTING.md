@@ -1,6 +1,16 @@
 # Contributing
 
-Thanks for helping! Issues and pull requests are welcome.
+Thanks for helping! Issues and pull requests are welcome. In short:
+
+- Branch off **`dev`** and open your PR into `dev` (not `main`; `main` only holds released code).
+- PR titles follow [Conventional Commits](https://www.conventionalcommits.org): `feat: …`, `fix: …`,
+  `docs: …`, `ci: …`, `chore: …`; `feat!: …` marks a breaking change. The title ends up in the release notes.
+- Sign off every commit (`git commit -s`, see [DCO](#developer-certificate-of-origin-dco) below).
+- CI (shellcheck, unit tests, image build, smoke test) must pass. Run locally:
+  `python3 -m unittest discover -s tests -p "test_*.py"` and `IMAGE=… tests/smoke.sh`.
+- Fixes for a release being prepared go into `release/vX.Y`.
+
+How branches, release candidates, releases and image tags work: [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Developer Certificate of Origin (DCO)
 
@@ -65,10 +75,9 @@ Use your real name (no pseudonyms or anonymous contributions). Every commit in a
 needs a sign-off; the `DCO` check on pull requests verifies it.
 
 Forgot it? Fix the last commit with `git commit --amend -s --no-edit`, or all commits of your
-branch with `git rebase --signoff origin/main`, then force-push.
+branch with `git rebase --signoff origin/dev`, then force-push.
 
 ## Pull requests
 
 - Keep changes focused; one topic per pull request.
-- Run the unit tests: `python -m unittest discover -s tests -p "test_*.py"`.
 - New source files start with `# SPDX-License-Identifier: AGPL-3.0-or-later`.

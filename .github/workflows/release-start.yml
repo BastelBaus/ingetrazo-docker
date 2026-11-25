@@ -1,0 +1,54 @@
+# Start a release: branch release/vX.Y off dev, the first release candidate
+# (release-rc.yml) and the release PR into main.
+#
+# Actions -> Release start -> Run workflow, version "X.Y".
+name: Release start
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Minor version X.Y (e.g. 0.2)"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  start:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Branch, first release candidate, release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # PRs opened with GITHUB_TOKEN start no CI; a token in RELEASE_TOKEN
+          # (fine-grained: contents + pull requests, read/write) avoids that.
+          PR_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          XY: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          XY="${XY#v}"
+          [[ $XY =~ ^[0-9]+\.[0-9]+$ ]] || { echo "::error::version must be X.Y, got '$XY'"; exit 1; }
+          b="release/v$XY"
+          if git ls-remote --exit-code --heads origin "$b" > /dev/null; then
+            echo "::error::$b exists already"; exit 1
+          fi
+          at=$(git rev-parse --short HEAD)
+          git push origin "HEAD:refs/heads/$b"
+          gh workflow run release-rc.yml --ref "$b"
+          body="Release branch \`$b\`, cut from \`dev\` at $at.
+
+          - Only fixes go into this branch now (PRs into \`$b\`); every push makes the next release candidate (image \`:rc\`).
+          - When a candidate is good, merge this PR with **Create a merge commit**: release-finalize.yml then tags the release, publishes \`:stable\` / \`:latest\` and opens the back-merge PR into \`dev\`.
+
+          See docs/RELEASING.md."
+          GH_TOKEN="$PR_TOKEN" gh pr create --base main --head "$b" \
+            --title "chore(release): v$XY" --body "$body"
+          echo "### Release v$XY started: branch \`$b\` from dev @ $at" >> "$GITHUB_STEP_SUMMARY"
