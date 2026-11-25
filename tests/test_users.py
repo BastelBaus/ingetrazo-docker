@@ -115,6 +115,25 @@ class UsersTest(unittest.TestCase):
         self.assertEqual(u.get("old").config, {})
         u.set_settings("old", {"nav_mode": "list"})
 
+    def test_guest(self):
+        self.users.ensure_admin("boss", "secret-pass")
+        with self.assertRaises(UserError):
+            self.users.create("Guest", "secret-pass")                # the name is kept
+        guest = self.users.ensure_guest()
+        self.assertEqual((guest.name, guest.role, guest.source), ("guest", "user", "guest"))
+        self.assertIsNotNone(self.users.guest())
+        self.assertIsNone(self.users.authenticate("guest", ""))
+        for change in (lambda: self.users.set_role("guest", "admin"),
+                       lambda: self.users.delete("guest"),
+                       lambda: self.users.set_password("guest", "secret-pass"),
+                       lambda: self.users.seen("guest", "oidc", [], None)):
+            with self.assertRaises(UserError):
+                change()
+        self.users.set_active("guest", False)
+        self.assertIsNone(self.users.guest())
+        self.assertFalse(self.users.ensure_guest().active)          # stays off
+        self.users.set_settings("guest", {"nav_mode": "tree"})
+
     def test_shared_file(self):
         """The viewer and the MCP server open the same file."""
         self.users.create("dora", "dora-pass")
@@ -249,6 +268,41 @@ class ViewerLoginTest(unittest.TestCase):
                                                 "edges_3d": "0", "csrf": token}, boss)
         self.assertEqual(status, 200, page)
         self.assertIn('data-nav="list" data-edges="0"', page)
+
+    def test_guest_login(self):
+        from viewer import auth as auth_mod
+        self.assertNotIn("Log in as guest", self.req("/login")[2])     # off by default
+        self.assertEqual(self.req("/login/guest", {"next": "/account"})[0], 404)
+        os.environ["VIEWER_GUEST"] = "true"
+        try:
+            self.server.auth = auth_mod.Auth()
+        finally:
+            os.environ.pop("VIEWER_GUEST")
+        self.assertIn("Log in as guest", self.req("/login")[2])
+        status, headers, _ = self.req("/login/guest", {"next": "/account"})
+        self.assertEqual((status, headers["Location"]), (303, "/account"))
+        guest = headers["Set-Cookie"].split(";")[0]
+        status, _, page = self.req("/account", cookie=guest)
+        self.assertEqual(status, 200)
+        self.assertIn("Every guest shares", page)
+        self.assertIn("data-csrf=", page)                              # has settings
+        self.assertEqual(self.req("/admin", cookie=guest)[0], 403)
+        # An admin switches the guest off: the session ends, no new one.
+        boss = self.login("boss", "boss-password")
+        token = self.csrf(self.req("/admin", cookie=boss)[2])
+        page = self.req("/admin", cookie=boss)[2]
+        self.assertIn("(guest)", page)
+        self.req("/admin", {"action": "active", "name": "guest", "on": "0", "csrf": token}, boss)
+        self.assertEqual(self.req("/account", cookie=guest)[0], 403)
+        self.assertEqual(self.req("/login/guest", {"next": "/"})[0], 403)
+        # VIEWER_GUEST off again: an old guest session no longer counts.
+        self.req("/admin", {"action": "active", "name": "guest", "on": "1", "csrf": token}, boss)
+        self.assertEqual(self.req("/account", cookie=guest)[0], 200)
+        sessions = self.server.auth.sessions
+        self.server.auth = auth_mod.Auth()
+        self.server.auth.sessions = sessions                          # same sessions
+        self.assertEqual(self.req("/account", cookie=guest)[0], 303)
+        self.assertEqual(self.req("/account", cookie=boss)[0], 200)
 
     def test_basic_auth_for_scripts(self):
         import base64

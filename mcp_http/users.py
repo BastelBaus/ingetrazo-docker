@@ -28,7 +28,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROLES = ("admin", "user")
-SOURCES = ("local", "oidc", "proxy")
+SOURCES = ("local", "oidc", "proxy", "guest")
+#: The guest user: who uses "Log in as guest" (VIEWER_GUEST). One user for
+#: every guest, with settings and rights like any other; never an admin.
+GUEST = "guest"
 #: A name: letters, digits and . _ - @ (e-mail addresses from a provider).
 NAME = re.compile(r"^[\w.@+-]{1,64}$", re.UNICODE)
 MIN_PASSWORD = 8
@@ -189,8 +192,10 @@ class Users:
             raise UserError("a user name is 1–64 letters, digits or . _ - @ +")
         if role not in ROLES:
             raise UserError(f"the role is one of {', '.join(ROLES)}")
-        if source not in SOURCES:
-            raise UserError(f"the source is one of {', '.join(SOURCES)}")
+        if source not in SOURCES or source == "guest":
+            raise UserError(f"the source is one of local, oidc, proxy")
+        if name.lower() == GUEST:
+            raise UserError(f"the name {GUEST!r} is kept for the guest user")
         if source == "local":
             self._check_password(password or "")
         with self._lock:
@@ -232,6 +237,8 @@ class Users:
         if role not in ROLES:
             raise UserError(f"the role is one of {', '.join(ROLES)}")
         acc = self._require(name)
+        if role == "admin" and acc.source == "guest":
+            raise UserError("the guest user cannot be an admin")
         if role != "admin":
             self._keeps_an_admin(acc)
         with self._lock:
@@ -247,6 +254,8 @@ class Users:
 
     def delete(self, name: str) -> None:
         acc = self._require(name)
+        if acc.source == "guest":
+            raise UserError("the guest user stays; switch it off instead")
         self._keeps_an_admin(acc)
         with self._lock:
             self._db.execute("DELETE FROM users WHERE name = ?", (acc.name,))
@@ -258,6 +267,8 @@ class Users:
         True / False when the provider's admin group decides the role,
         None when the admin panel does."""
         acc = self.get(name)
+        if acc is not None and acc.source == "guest":
+            raise UserError(f"the name {GUEST!r} is kept for the guest user")
         if acc is None:
             role = "admin" if admin_by_group else "user"
             with self._lock:
@@ -302,6 +313,24 @@ class Users:
             self._db.execute("UPDATE users SET config = ? WHERE name = ?",
                              (json.dumps(conf), acc.name))
         return self.settings_of(self.get(acc.name))
+
+    def ensure_guest(self) -> Account:
+        """The guest user, made on first use (switched on)."""
+        with self._lock:
+            self._db.execute(
+                "INSERT OR IGNORE INTO users (name, role, source, created) "
+                "VALUES (?, 'user', 'guest', ?)", (GUEST, _now()))
+            self._db.execute("UPDATE users SET role = 'user', source = 'guest', "
+                             "password = NULL WHERE name = ?", (GUEST,))
+        return self.get(GUEST)
+
+    def guest(self) -> Account | None:
+        """The guest user when it is switched on."""
+        acc = self.get(GUEST)
+        if acc is None or acc.source != "guest" or not acc.active:
+            return None
+        self._touch(acc.name)
+        return acc
 
     def ensure_admin(self, name: str, password: str) -> bool:
         """The first admin, from the environment: created when there is no

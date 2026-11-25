@@ -116,6 +116,7 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `OAUTH_USER` / `OAUTH_PASSWORD` | `admin` / – | `oauth`: who approves clients (password at least 12 characters) |
 | `OAUTH_REDIRECT_URIS` | claude.ai, claude.com, loopback | `oauth`: redirect URIs clients may register (comma-separated) |
 | `VIEWER_AUTH_MODE` | `local` | Viewer login: `local`, `none`, `oidc` or `proxy` (see [Viewer login](#viewer-login)) |
+| `VIEWER_GUEST` | `false` | `local` / `oidc`: a *Log in as guest* button on the login page (see [Users](#users)) |
 | `VIEWER_PASSWORD` | – | `local`: the password (user `VIEWER_USER`); login page for browsers, Basic auth for scripts |
 | `VIEWER_PRERENDER` | `previews` | What the viewer renders before anyone looks: `previews`, `none` or `all` (see [Rendering on demand](#rendering-on-demand)) |
 | `VIEWER_SHEET_DPI` | `120` | Sheet image resolution |
@@ -241,6 +242,10 @@ The users live in one SQLite file, `users.db`, on the volume `users` that both s
 - **`oidc` and `proxy`**: a user is added on first login, as `user`. With `OIDC_ADMIN_GROUP` / `PROXY_ADMIN_GROUP`
   set, that group decides who is admin; without it, the admin panel does. Passwords stay with the provider.
 - **Everyone** sees their account at `/account` (their name in the top bar); local users change their password there.
+- **Guest** (`VIEWER_GUEST=true`, for the `local` and `oidc` logins): the login page gets a **Log in as guest**
+  button that lets anyone in without a password, as the one user `guest`. The guest has settings like everyone
+  else (shared by all guests), is never an admin, and an admin can switch it off in the panel without restarting.
+  `VIEWER_AUTH_MODE=none` stays the viewer without any login.
 - **Settings per user**: what a user switches in the viewer is kept with them, in the user list, and follows them
   to any browser: list or tree in the dropdowns (default `VIEWER_NAV_MODE`), edges in the 3D view. `/account` shows
   them, with *Default* to go back to the container's. Without an account (`VIEWER_AUTH_MODE=none`) the browser
