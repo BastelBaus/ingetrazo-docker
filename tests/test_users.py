@@ -88,6 +88,33 @@ class UsersTest(unittest.TestCase):
         self.assertEqual(self.users.get("alice").role, "admin")
         self.assertEqual(self.users.get("bob").source, "proxy")
 
+    def test_settings(self):
+        self.users.create("eve", "eve-password")
+        self.assertEqual(self.users.settings_of(self.users.get("eve")),
+                         {"nav_mode": None, "edges_3d": True})
+        conf = self.users.set_settings("eve", {"nav_mode": "tree", "edges_3d": False})
+        self.assertEqual(conf, {"nav_mode": "tree", "edges_3d": False})
+        for bad in ({"nav_mode": "sideways"}, {"colour": "red"}, {"edges_3d": 1}):
+            with self.assertRaises(UserError):
+                self.users.set_settings("eve", bad)
+        self.assertEqual(self.users.set_settings("eve", {"nav_mode": None})["nav_mode"], None)
+        self.assertFalse(Users(self.users.path).get("eve").config["edges_3d"])
+
+    def test_migrates_an_old_list(self):
+        """A users.db of version 1 (before settings) gets the new column."""
+        import sqlite3
+        from mcp_http import users as mod
+        path = Path(self.tmp.name) / "v1.db"
+        db = sqlite3.connect(path)
+        db.execute(mod.MIGRATIONS[0])
+        db.execute("INSERT INTO users (name, created) VALUES ('old', 'x')")
+        db.execute("PRAGMA user_version=1")
+        db.commit()
+        db.close()
+        u = Users(path)
+        self.assertEqual(u.get("old").config, {})
+        u.set_settings("old", {"nav_mode": "list"})
+
     def test_shared_file(self):
         """The viewer and the MCP server open the same file."""
         self.users.create("dora", "dora-pass")
@@ -200,6 +227,28 @@ class ViewerLoginTest(unittest.TestCase):
                                                 "password": "new-password", "csrf": token}, boss)
         self.assertEqual(status, 200, page)
         self.login("boss", "new-password")
+
+    def test_settings_follow_the_user(self):
+        boss = self.login("boss", "boss-password")
+        page = self.req("/account", cookie=boss)[2]
+        self.assertIn('data-nav="list"', page)
+        token = self.csrf(page)
+        status, _, body = self.req("/account/settings", {"nav_mode": "tree", "csrf": token}, boss,
+                                   accept="application/json")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["nav_mode"], "tree")
+        self.assertIn('data-nav="tree"', self.req("/account", cookie=boss)[2])
+        # Another session (another browser) gets the same.
+        self.assertIn('data-nav="tree"', self.req("/account", cookie=self.login("boss", "boss-password"))[2])
+        status, _, _ = self.req("/account/settings", {"nav_mode": "x", "csrf": token}, boss)
+        self.assertEqual(status, 400)
+        status, _, _ = self.req("/account/settings", {"nav_mode": "list"}, boss)
+        self.assertEqual(status, 403)                                  # no token
+        # The account page's form; "" goes back to the default.
+        status, _, page = self.req("/account", {"action": "settings", "nav_mode": "",
+                                                "edges_3d": "0", "csrf": token}, boss)
+        self.assertEqual(status, 200, page)
+        self.assertIn('data-nav="list" data-edges="0"', page)
 
     def test_basic_auth_for_scripts(self):
         import base64

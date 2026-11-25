@@ -350,6 +350,11 @@ class Auth:
         acc = self.users.get(user.name)
         return User.of(acc) if acc and acc.active else None
 
+    def settings(self, user: User | None) -> dict:
+        """The settings ``user`` works with (mcp_http/users.py SETTINGS)."""
+        acc = self.users.get(user.name) if self.users is not None and user else None
+        return Users.settings_of(acc)
+
     def disabled(self, name: str) -> bool:
         acc = self.users.get(name) if self.users is not None and name else None
         return bool(acc and not acc.active)

@@ -30,7 +30,8 @@ color:#6b6b66;font-size:14px;pointer-events:none;text-align:center;padding:16px}
 
 #: The 3D view's script. Reads its settings from the stage's data-*
 #: attributes; keeps the camera across the page's live reloads
-#: (sessionStorage) and the edge switch across visits (localStorage).
+#: (sessionStorage) and the edge switch in the user's settings (without
+#: an account: localStorage).
 JS = r"""
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -161,11 +162,19 @@ function showEdges(on) {
   if (edges) edges.visible = on;
   edgeBtn.classList.toggle('on', on);
   edgeBtn.setAttribute('aria-pressed', String(on));
-  store(localStorage, 'edges3d', on ? '1' : '0');
   draw();
 }
 
-edgeBtn.addEventListener('click', () => showEdges(!(edges && edges.visible)));
+function saveEdges(on) {
+  if (document.body.dataset.csrf && window.saveSetting) window.saveSetting('edges_3d', on ? 1 : 0);
+  else store(localStorage, 'edges3d', on ? '1' : '0');
+}
+
+edgeBtn.addEventListener('click', () => {
+  const on = !(edges && edges.visible);
+  showEdges(on);
+  saveEdges(on);
+});
 function choose(i) {
   mark(i);
   preset(i);
@@ -216,7 +225,9 @@ new GLTFLoader().load(stage.dataset.glb, (gltf) => {
   } else {
     fit();
   }
-  showEdges(load(localStorage, 'edges3d') !== '0');
+  // The user's setting (data-edges), or without an account this browser's.
+  const own = document.body.dataset.csrf ? null : load(localStorage, 'edges3d');
+  showEdges(own !== null ? own !== '0' : document.body.dataset.edges !== '0');
 }, (ev) => {
   if (ev.total) say(`Loading the 3D model… ${Math.round(100 * ev.loaded / ev.total)} %`);
 }, (err) => {

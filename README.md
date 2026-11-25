@@ -12,8 +12,8 @@ container**:
   sheet or view at a time, fitted to the window. A slim top bar has three dropdowns, **View**, **3D** and
   **Sheet**, with the model's folders (nested too) and a filter, plus ‹ › buttons (or the ← → keys) to step
   through the sheets and views. Each dropdown shows its folders either as a **list** (every level at once) or as a
-  **tree** (one level at a time: tap a folder to step in, ‹ to step out); the switch is in the dropdown and
-  `VIEWER_NAV_MODE` sets the default. Each sheet and view has its own link (`/m/<model>?sheet=2`, `?view=1`). The
+  **tree** (one level at a time: tap a folder to step in, ‹ to step out); the switch is in the dropdown, kept in the
+  user's settings, and `VIEWER_NAV_MODE` sets the default. Each sheet and view has its own link (`/m/<model>?sheet=2`, `?view=1`). The
   **3D** dropdown shows the model in 3D in the browser (three.js): drag to turn it, right-drag to move, wheel to
   zoom, the edges as lines; its entries are the whole model and the saved views as camera presets
   (`?3d=1&cam=2`). Models whose 3D file is bigger than `VIEWER_GLB_MAX_MB` get no 3D view.
@@ -119,7 +119,7 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `VIEWER_PASSWORD` | – | `local`: the password (user `VIEWER_USER`); login page for browsers, Basic auth for scripts |
 | `VIEWER_PRERENDER` | `previews` | What the viewer renders before anyone looks: `previews`, `none` or `all` (see [Rendering on demand](#rendering-on-demand)) |
 | `VIEWER_SHEET_DPI` | `120` | Sheet image resolution |
-| `VIEWER_NAV_MODE` | `list` | How the View / 3D / Sheet dropdowns show folders by default: `list` (all levels) or `tree` (one level at a time); each browser can switch |
+| `VIEWER_NAV_MODE` | `list` | How the View / 3D / Sheet dropdowns show folders by default: `list` (all levels) or `tree` (one level at a time); each user can switch (kept in their settings) |
 | `VIEWER_GLB_MAX_MB` | `50` | 3D view: a model whose GLB is bigger gets no 3D view (it is still rendered as sheets and views); `0` turns the 3D view off |
 | `INGETRAZO_IMAGE` | `ghcr.io/bastelbaus/ingetrazo:latest` | Image to pull (or tag to build) |
 | `INGETRAZO_REPO` / `INGETRAZO_REF` | fork / pinned commit | Which IngeTrazo to build |
@@ -241,6 +241,10 @@ The users live in one SQLite file, `users.db`, on the volume `users` that both s
 - **`oidc` and `proxy`**: a user is added on first login, as `user`. With `OIDC_ADMIN_GROUP` / `PROXY_ADMIN_GROUP`
   set, that group decides who is admin; without it, the admin panel does. Passwords stay with the provider.
 - **Everyone** sees their account at `/account` (their name in the top bar); local users change their password there.
+- **Settings per user**: what a user switches in the viewer is kept with them, in the user list, and follows them
+  to any browser: list or tree in the dropdowns (default `VIEWER_NAV_MODE`), edges in the 3D view. `/account` shows
+  them, with *Default* to go back to the container's. Without an account (`VIEWER_AUTH_MODE=none`) the browser
+  keeps them.
 
 Switching a user off or removing them ends their session at once. A viewer that kept users in `/state/users.json`
 takes them over on its first start.

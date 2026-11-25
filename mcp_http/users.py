@@ -5,7 +5,8 @@ mount, so the viewer and the MCP server share one list.
 
 A user has a name, a role (``admin`` or ``user``), where they come from
 (``local``: a password kept here; ``oidc`` / ``proxy``: logged in
-elsewhere, recorded on first login) and whether they are active. Admins
+elsewhere, recorded on first login), whether they are active, and the
+settings they work with (``SETTINGS``, kept as they change them). Admins
 manage the list in the viewer's admin panel (``/admin``).
 
 Passwords are stored as scrypt hashes. The schema carries its version in
@@ -44,7 +45,19 @@ MIGRATIONS: list[str] = [
          created TEXT NOT NULL,
          last_login TEXT
        )""",
+    # 2: the settings a user works with (SETTINGS), as JSON.
+    "ALTER TABLE users ADD COLUMN config TEXT NOT NULL DEFAULT '{}'",
 ]
+
+#: The settings a user keeps (the viewer's and later the MCP server's):
+#: name → (allowed values, default). The default ``None`` means "as the
+#: container is set up" (an environment variable).
+SETTINGS: dict[str, tuple[tuple, object]] = {
+    # The View / 3D / Sheet dropdowns: every folder level, or one at a time.
+    "nav_mode": (("list", "tree"), None),
+    # The 3D view draws the edges as lines.
+    "edges_3d": ((True, False), True),
+}
 
 
 def _now() -> str:
@@ -81,6 +94,7 @@ class Account:
     groups: list[str] = field(default_factory=list)
     created: str = ""
     last_login: str | None = None
+    config: dict = field(default_factory=dict)
 
     @property
     def admin(self) -> bool:
@@ -128,8 +142,13 @@ class Users:
             groups = json.loads(row["groups"] or "[]")
         except ValueError:
             groups = []
+        try:
+            config = json.loads(row["config"] or "{}")
+        except ValueError:
+            config = {}
         return Account(row["name"], row["role"], row["source"], bool(row["active"]),
-                       bool(row["password"]), groups, row["created"], row["last_login"])
+                       bool(row["password"]), groups, row["created"], row["last_login"],
+                       config if isinstance(config, dict) else {})
 
     def get(self, name: str) -> Account | None:
         with self._lock:
@@ -255,6 +274,34 @@ class Users:
                 "UPDATE users SET " + ", ".join(f"{k} = ?" for k in updates)
                 + " WHERE name = ?", (*updates.values(), acc.name))
         return self.get(name)
+
+    # ---- settings ----------------------------------------------------------------
+    @staticmethod
+    def settings_of(acc: Account | None) -> dict:
+        """Every setting: the user's, else its default (None: the container's)."""
+        conf = acc.config if acc else {}
+        return {k: conf[k] if conf.get(k) in allowed else default
+                for k, (allowed, default) in SETTINGS.items()}
+
+    def set_settings(self, name: str, changes: dict) -> dict:
+        """Changes some settings (unknown names and values are refused, None
+        goes back to the default). Returns all of them."""
+        acc = self._require(name)
+        conf = dict(acc.config)
+        for key, value in changes.items():
+            if key not in SETTINGS:
+                raise UserError(f"there is no setting {key!r}")
+            allowed, _ = SETTINGS[key]
+            if value is None:
+                conf.pop(key, None)
+            elif value in allowed and type(value) is type(allowed[0]):
+                conf[key] = value
+            else:
+                raise UserError(f"{key} is one of {', '.join(map(str, allowed))}")
+        with self._lock:
+            self._db.execute("UPDATE users SET config = ? WHERE name = ?",
+                             (json.dumps(conf), acc.name))
+        return self.settings_of(self.get(acc.name))
 
     def ensure_admin(self, name: str, password: str) -> bool:
         """The first admin, from the environment: created when there is no
