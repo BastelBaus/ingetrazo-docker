@@ -77,6 +77,20 @@ needs a sign-off; the `DCO` check on pull requests verifies it.
 Forgot it? Fix the last commit with `git commit --amend -s --no-edit`, or all commits of your
 branch with `git rebase --signoff origin/dev`, then force-push.
 
+Already merged into `dev` (or another shared branch) and not to be rewritten? Add a
+*remediation commit*: an empty commit, signed off itself, with one line per commit:
+
+```sh
+git commit --allow-empty -s -F - <<EOF
+chore: DCO remediation
+
+I, $(git config user.name) <$(git config user.email)>, hereby add my Signed-off-by to this commit: <sha>
+EOF
+```
+
+The `DCO` check accepts a line only when the remediation commit is signed off by the same
+`Name <email>`.
+
 ## Pull requests
 
 - Keep changes focused; one topic per pull request.
