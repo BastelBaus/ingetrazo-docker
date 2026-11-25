@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Read-only live viewer: every sheet and saved view of every model in the
-data folder, in the browser, refreshed when a model file changes.
+"""Read-only live viewer: the sheets and saved views of the models in the
+model folders, in the browser, rendered when someone looks at them
+(render.py) and refreshed when a model file changes.
 
-Routes: ``/`` overview, ``/m/<slug>`` one model, one sheet or view at a time
-(``?sheet=N`` / ``?view=N``, 1-based) or the model in 3D (``?3d=1``),
+Routes: ``/`` overview (folder by folder, a preview per model), ``/m/<slug>``
+one model, one sheet or view at a time (``?sheet=N`` / ``?view=N``,
+1-based), the model in 3D (``?3d=1``) or its sheets as PDF (``?pdf=1``),
 ``/files/<slug>/<rev>/<f>`` rendered images, PDF and GLB, ``/static/<f>``
-the 3D view's script library (three.js), ``/events`` server-sent events (a render finished),
+the 3D view's script library (three.js), ``/events`` server-sent events
+(a listing or render started or finished),
+``/admin`` the user list (admins), ``/account`` one's own account,
+``/avatar/<user>.svg`` a user's avatar,
 ``/healthz`` (always open). Who may see the rest: ``VIEWER_AUTH_MODE``
 (see auth.py) — ``local`` (``/login``, ``/logout``, Basic auth for
 scripts), ``none``, ``oidc`` (``/auth/login``, ``/auth/callback``) or
@@ -14,6 +19,7 @@ scripts), ``none``, ``oidc`` (``/auth/login``, ``/auth/callback``) or
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import os
 import re
@@ -25,15 +31,23 @@ from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
+from mcp_http import folders, shares
 from mcp_http.appbridge import App, log
+from mcp_http.users import UserError
 
+from . import admin, avatar
 from .auth import Auth, User
-from .render import CACHE_DIR, POLL, Renderer
+from .render import (CACHE_DIR, GLB_MAX_MB, NEXT, NOW, POLL, PRERENDER, PREVIEW,
+                     WITH_PDF, Renderer)
 from .view3d import THREE_DIR, view3d
 
 renderer: Renderer
 auth: Auth
 TITLE = os.environ.get("VIEWER_TITLE", "IngeTrazo viewer")
+#: How the View / 3D / Sheet dropdowns show folders by default: "list"
+#: (every level at once) or "tree" (one level at a time). Each browser can
+#: switch in the dropdown.
+NAV_MODE = "tree" if os.environ.get("VIEWER_NAV_MODE", "").strip().lower() == "tree" else "list"
 _SAFE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 CSS = """
@@ -76,7 +90,13 @@ border:1px solid var(--line);background:var(--card);padding:4px 8px;border-radiu
 .dd-panel{position:absolute;top:calc(100% + 6px);left:0;z-index:10;width:min(380px,calc(100vw - 24px));
 max-height:min(70vh,560px);display:flex;flex-direction:column;background:var(--card);border:1px solid var(--line);
 border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.18)}
-.dd-filter{margin:8px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit;font-size:14px}
+.dd-tools{display:flex;gap:6px;align-items:center;margin:8px}.dd-tools:empty{display:none}
+.dd-mode{flex:none;margin-left:auto;border:1px solid var(--line);background:var(--card);color:var(--fg);
+padding:4px 8px;border-radius:6px;font:inherit;font-size:12px;cursor:pointer}
+.dd-mode:hover{border-color:var(--accent)}
+.dd-up{display:block;padding:5px 12px;font-size:13px;color:var(--accent);cursor:pointer;border-bottom:1px solid var(--line);
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dd-up[hidden]{display:none}
+.dd-filter{flex:1;min-width:0;margin:0;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit;font-size:14px}
 .dd-list{overflow:auto;padding:4px 0 8px;font-size:14px}
 .dd-list a,.dd-list .f{display:block;padding:3px 12px 3px calc(12px + var(--d,0) * 14px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dd-list a{color:var(--fg)}.dd-list a:hover{background:var(--bg);text-decoration:none}
@@ -84,6 +104,11 @@ border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.18)}
 .dd-list .f{color:var(--muted);font-size:12px;padding-top:7px}.dd-list .f::before{content:"▸ "}
 .dd-list .none{font-style:italic}.dd-list .none::before{content:""}
 .dd-empty{color:var(--muted);padding:6px 12px;font-size:13px}
+.dd-list>[hidden]{display:none}
+.dd-list.tree>a,.dd-list.tree>.f{padding-left:12px}
+.dd-list.tree>.f{cursor:pointer;color:var(--fg);font-size:14px;padding-top:3px}
+.dd-list.tree>.f::before{content:""}.dd-list.tree>.f::after{content:" ›";color:var(--muted)}
+.dd-list.tree>.f:hover{background:var(--bg)}
 section h2{font-size:15px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:8px 0 12px}
 figure{margin:0 0 28px;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)}
 figure a.img{display:block;background:var(--sheet)}
@@ -104,52 +129,88 @@ header.bar{flex-wrap:wrap}header.bar h1{max-width:none;flex:1}header.bar .meta{d
 .dd-panel{left:12px;width:auto;right:12px}}
 .btn.on{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,var(--card));font-weight:600}
 a.btn:hover{text-decoration:none;border-color:var(--accent)}
-.who{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:14em}
+.who{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:14em;display:inline-flex;align-items:center;gap:6px}
+img.avatar{border-radius:50%;flex:none;vertical-align:middle}
 @media (max-width:820px){.who{display:none}}
+.pending{display:flex;align-items:center;justify-content:center;min-height:min(60vh,520px);background:var(--sheet);color:#6b6b66}
+.pending span::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px;
+background:var(--warn);animation:pulse 1s infinite}
+section.folder{margin-bottom:28px}
+.tag{font-size:11px;letter-spacing:.04em;border:1px solid var(--line);border-radius:4px;padding:1px 5px;vertical-align:middle}
 """
 
 JS = """
+// Saves one of the user's settings (/account/settings); the page keeps
+// working when that fails.
+window.saveSetting = function(key, value){
+  const csrf = document.body.dataset.csrf;
+  if (!csrf) return Promise.resolve(false);
+  const body = new URLSearchParams({csrf: csrf, [key]: String(value)});
+  return fetch('/account/settings', {method: 'POST', body: body, credentials: 'same-origin'})
+    .then(r => r.ok).catch(() => false);
+};
 (function(){
   const slug = document.body.dataset.slug || null;
+  // What this page waits for: a listing ("list"), "preview", "sheet:N", …
+  const wait = (document.body.dataset.wait || '').split(' ').filter(Boolean);
   const dot = document.getElementById('live');
   const key = 'scroll:' + location.pathname;
   try { const y = sessionStorage.getItem(key); if (y !== null) { sessionStorage.removeItem(key);
         window.scrollTo(0, parseInt(y, 10)); } } catch (e) {}
   function set(state, text){ if (!dot) return; dot.className = 'live ' + state;
                              dot.querySelector('span').textContent = text; }
+  function reload(){
+    try { sessionStorage.setItem(key, String(window.scrollY)); } catch (e) {}
+    location.reload();
+  }
   function connect(){
     const es = new EventSource('/events');
     es.onopen = () => set('on', 'live');
     es.onerror = () => set('', 'reconnecting…');
     es.onmessage = (m) => {
       let ev; try { ev = JSON.parse(m.data); } catch (e) { return; }
-      if (slug && ev.slug !== slug) return;
-      if (ev.rendering) { set('busy', 'updating…'); return; }
-      try { sessionStorage.setItem(key, String(window.scrollY)); } catch (e) {}
-      location.reload();
+      if (ev.kind === 'idle') { set('on', 'live'); return; }
+      if (ev.kind === 'rendering') {
+        if (!slug || ev.slug === slug) set('busy', 'rendering…');
+        return;
+      }
+      if (slug) {
+        // A model page: its model changed, or what it waits for is done.
+        if (ev.slug === slug && (ev.kind === 'listed' || ev.kind === 'removed'
+            || (ev.kind === 'done' && wait.includes(ev.item)))) reload();
+      } else if (ev.kind === 'models' || ev.kind === 'removed' || ev.kind === 'listed'
+                 || (ev.kind === 'done' && wait.includes(ev.item))) {
+        reload();                    // the overview
+      }
     };
   }
   if (window.EventSource) connect();
 
-  // ---- the View / Sheet dropdowns of the top bar ----
+  // ---- the View / 3D / Sheet dropdowns of the top bar ----
   const header = document.querySelector('header');
   const dds = Array.from(document.querySelectorAll('details.dd'));
   if (!dds.length) return;
   function pad(){ document.documentElement.style.scrollPaddingTop = (header.offsetHeight + 8) + 'px'; }
   pad(); window.addEventListener('resize', pad);
   function closeAll(except){ dds.forEach(d => { if (d !== except) d.open = false; }); }
-  dds.forEach(dd => {
+  // "list": every level at once; "tree": one level, folders to step into.
+  // The server's default (data-nav), or what this browser chose.
+  // A user with an account keeps the choice in their settings (data-nav,
+  // saved below); without one, this browser keeps it.
+  const csrf = document.body.dataset.csrf || '';
+  let mode = document.body.dataset.nav === 'tree' ? 'tree' : 'list';
+  if (!csrf) try { const m = localStorage.getItem('navmode'); if (m === 'tree' || m === 'list') mode = m; } catch (e) {}
+  const SEP = ' › ';
+  function setup(dd){
     const filter = dd.querySelector('.dd-filter');
-    dd.addEventListener('toggle', () => {
-      if (!dd.open) return;
-      closeAll(dd);
-      const on = dd.querySelector('a.on');
-      if (on) on.scrollIntoView({block: 'nearest'});
-      if (filter && matchMedia('(pointer:fine)').matches) filter.focus();
-    });
-    if (filter) filter.addEventListener('input', () => {
-      const q = filter.value.trim().toLowerCase();
-      const rows = Array.from(dd.querySelectorAll('.dd-list > *'));
+    const list = dd.querySelector('.dd-list');
+    const up = dd.querySelector('.dd-up');
+    const btn = dd.querySelector('.dd-mode');
+    const rows = Array.from(list.children);
+    const folders = rows.some(r => r.dataset.p);
+    let at = [];                              // the tree's current folder
+    function flat(q){
+      list.classList.remove('tree'); up.hidden = true;
       let any = false;
       rows.forEach(r => { if (r.tagName === 'A') {
         const hit = !q || (r.dataset.folder + ' ' + r.textContent).toLowerCase().includes(q);
@@ -163,8 +224,52 @@ JS = """
           if (rj.tagName === 'A' && !rj.hidden) { keep = true; break; } }
         r.hidden = !keep; });
       dd.querySelector('.dd-empty').hidden = any;
+    }
+    function tree(path){
+      at = path; const key = JSON.stringify(path);
+      list.classList.add('tree');
+      rows.forEach(r => { r.hidden = r.classList.contains('none') || r.dataset.in !== key; });
+      up.hidden = !path.length;
+      up.textContent = '‹ ' + path.join(SEP);
+      dd.querySelector('.dd-empty').hidden = true;
+    }
+    function show(){
+      const q = filter ? filter.value.trim().toLowerCase() : '';
+      if (btn) { btn.textContent = mode === 'tree' ? 'List' : 'Tree';
+                 btn.setAttribute('aria-pressed', String(mode === 'tree')); }
+      if (mode === 'tree' && folders && !q) tree(at); else flat(q);
+    }
+    dd._show = show;
+    function start(){
+      // The tree opens at the folder of what is on screen.
+      const on = dd.querySelector('a.on');
+      try { at = on ? JSON.parse(on.dataset.in || '[]') : []; } catch (e) { at = []; }
+    }
+    list.addEventListener('click', (e) => {
+      const f = e.target.closest('.f');
+      if (!f || !f.dataset.p || !list.classList.contains('tree')) return;
+      tree(JSON.parse(f.dataset.p));
     });
-  });
+    up.addEventListener('click', () => tree(at.slice(0, -1)));
+    if (btn) btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      mode = mode === 'tree' ? 'list' : 'tree';
+      if (csrf) window.saveSetting('nav_mode', mode);
+      else try { localStorage.setItem('navmode', mode); } catch (err) {}
+      start(); dds.forEach(d => d._show && d._show());
+    });
+    dd.addEventListener('toggle', () => {
+      if (!dd.open) return;
+      closeAll(dd);
+      start(); show();
+      const on = dd.querySelector('a.on');
+      if (on && !on.hidden) on.scrollIntoView({block: 'nearest'});
+      if (filter && matchMedia('(pointer:fine)').matches) filter.focus();
+    });
+    if (filter) filter.addEventListener('input', show);
+    start(); show();
+  }
+  dds.forEach(setup);
   document.addEventListener('click', (e) => { if (!e.target.closest('details.dd')) closeAll(null); });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { closeAll(null); return; }
@@ -179,38 +284,64 @@ JS = """
 
 
 def _account(user: User | None) -> str:
-    """The top bar's right end: who is logged in, and the way out."""
+    """The top bar's right end: who is logged in (their own page), the
+    admin panel for admins, and the way out."""
     if user is None or auth.mode == "none":
         return ""
-    who = ""
-    if auth.mode in ("oidc", "proxy"):
-        role = " (admin)" if user.role == "admin" else ""
-        who = f'<span class="muted who" title="{escape(user.name + role)}">{escape(user.name)}</span>'
+    role = " (admin)" if user.admin else ""
+    who = (f'<a class="muted who" href="/account" title="{escape(user.name + role)}">'
+           f'{avatar_img(user.name, 22)}{escape(user.name)}</a>')
+    admin = '<a class="btn" href="/admin" title="Users">Users</a>' if user.admin else ""
     out = ('<a class="btn" href="/logout">Log out</a>'
            if auth.mode != "proxy" or auth.proxy.logout_url else "")
-    return who + out
+    return who + admin + out
+
+
+def _settings(user: User | None) -> str:
+    """The body's data-* attributes with the user's settings, and the token
+    the page's script saves a changed one with (users with an account)."""
+    conf = (auth.settings(user) if hasattr(auth, "settings")
+            else {"nav_mode": None, "edges_3d": True})
+    nav = conf.get("nav_mode") or NAV_MODE
+    out = f' data-nav="{nav}" data-edges="{1 if conf.get("edges_3d", True) else 0}"'
+    if user is not None and getattr(auth, "users", None) is not None \
+            and auth.users.get(user.name) is not None:
+        out += f' data-csrf="{auth.sessions.csrf(user.name)}"'
+    return out
+
+
+def avatar_img(name: str, size: int) -> str:
+    """A user's avatar as an <img> (the URL changes with the avatar)."""
+    acc = auth.users.get(name) if getattr(auth, "users", None) is not None else None
+    if acc is None:
+        return ""
+    a = avatar.valid(acc.avatar) or avatar.default(acc.name)
+    return (f'<img class="avatar" src="/avatar/{quote(acc.name)}.svg?v={a["seed"]}{a["hue"]}" '
+            f'width="{size}" height="{size}" alt="">')
 
 
 def _page(title: str, header: str, body: str, slug: str | None = None,
-          bar: bool = False, user: User | None = None) -> bytes:
+          bar: bool = False, user: User | None = None,
+          wait: list[str] | None = None) -> bytes:
+    """``wait``: the items whose render reloads the page when it is done."""
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{escape(title)}</title><style>{CSS}</style></head>
-<body data-slug="{escape(slug or '')}"><header{' class="bar"' if bar else ''}>{header}{'' if bar else '<span class="spacer"></span>'}
+<body data-slug="{escape(slug or '')}" data-wait="{escape(' '.join(wait or []))}"{_settings(user)}><header{' class="bar"' if bar else ''}>{header}{'' if bar else '<span class="spacer"></span>'}
 <span id="live" class="live"><i></i><span>connecting…</span></span>{_account(user)}</header>
 <main>{body}</main><script>{JS}</script></body></html>""".encode("utf-8")
 
 
 def _when(index: dict) -> str:
-    return escape((index.get("rendered_at") or "").replace("T", " ").replace("+00:00", " UTC"))
+    return escape((index.get("listed_at") or "").replace("T", " ").replace("+00:00", " UTC"))
 
 
 def _count(n: int, word: str) -> str:
     return f"{n} {word}" + ("" if n == 1 else "s")
 
 
-def _file_url(index: dict, file: str) -> str:
-    return f"/files/{quote(index['slug'])}/{quote(index['rev'])}/{quote(file)}"
+def _file_url(slug: str, rev: str, file: str) -> str:
+    return f"/files/{quote(slug)}/{quote(rev)}/{quote(file)}"
 
 
 SEP = " › "
@@ -226,16 +357,24 @@ def _folder(item: dict) -> list[str]:
     return [p for p in str(f or "").split("/") if p.strip()]
 
 
+def _path_json(path: list[str]) -> str:
+    """A folder path as the browser's JSON.stringify writes it (compared as
+    text by the tree's script)."""
+    return json.dumps(path, ensure_ascii=False, separators=(",", ":"))
+
+
 def _dropdown(label: str, entries: list[tuple[str, str, list[str]]],
-              current: str = "") -> str:
+              current: str = "", attrs: dict[str, str] | None = None) -> str:
     """One dropdown of the top bar: ``entries`` are (link, name, folder
     path) in document order, shown as a folder tree – in each folder its
     subfolders first, then its entries, as IngeTrazo's explorers do; the
     entries outside any folder come last, under "No folder". The entry
     whose link is ``current`` is marked and named in the closed dropdown;
-    without one, it shows how many entries there are."""
+    without one, it shows how many entries there are. ``attrs``: extra
+    HTML attributes of an entry, by its link."""
     if not entries:
         return ""
+    attrs = attrs or {}
     tree: dict = {"sub": {}, "items": []}
     for link, name, path in entries:
         node = tree
@@ -247,17 +386,21 @@ def _dropdown(label: str, entries: list[tuple[str, str, list[str]]],
     def item(link: str, name: str, path: list[str], depth: int) -> None:
         on = ' class="on" aria-current="page"' if link == current else ""
         rows.append(f'<a href="{escape(link)}"{on} style="--d:{depth}" '
-                    f'data-folder="{escape(SEP.join(path))}">{escape(name)}</a>')
+                    f'data-folder="{escape(SEP.join(path))}" '
+                    f'data-in="{escape(_path_json(path))}"{attrs.get(link, "")}>'
+                    f'{escape(name)}</a>')
 
-    def walk(node: dict, depth: int) -> None:
+    def walk(node: dict, depth: int, at: list[str]) -> None:
         for name, sub in node["sub"].items():
-            rows.append(f'<div class="f" style="--d:{depth}">{escape(name)}</div>')
-            walk(sub, depth + 1)
+            rows.append(f'<div class="f" style="--d:{depth}" '
+                        f'data-in="{escape(_path_json(at))}" '
+                        f'data-p="{escape(_path_json(at + [name]))}">{escape(name)}</div>')
+            walk(sub, depth + 1, at + [name])
         if depth:
             for e in node["items"]:
                 item(*e, depth)
 
-    walk(tree, 0)
+    walk(tree, 0, [])
     if tree["items"]:
         if tree["sub"]:
             rows.append('<div class="f none" style="--d:0">No folder</div>')
@@ -265,6 +408,10 @@ def _dropdown(label: str, entries: list[tuple[str, str, list[str]]],
             item(*e, 1 if tree["sub"] else 0)
     filt = ('<input class="dd-filter" type="search" placeholder="Filter…" '
             f'aria-label="Filter {escape(label.lower())}s">' if len(entries) > FILTER_FROM else "")
+    # List (every level at once) or tree (one level, folders to step into):
+    # a switch in the panel, kept per browser, for every dropdown alike.
+    mode = ('<button class="dd-mode" type="button" title="Show the folders as a list '
+            'or step through them as a tree">Tree</button>' if tree["sub"] else "")
     cur = f'<span class="cur muted">{len(entries)}</span>'
     for link, name, path in entries:
         if link == current:
@@ -273,37 +420,111 @@ def _dropdown(label: str, entries: list[tuple[str, str, list[str]]],
                    + (f'<span class="p">{where}</span>' if where else "")
                    + f'{escape(name)}</span>')
             break
-    return (f'<details class="dd"><summary><span class="k">{escape(label)}</span>'
-            f'{cur}</summary>'
-            f'<div class="dd-panel">{filt}<div class="dd-list">{"".join(rows)}</div>'
+    return (f'<details class="dd" data-kind="{escape(label.lower())}"><summary>'
+            f'<span class="k">{escape(label)}</span>{cur}</summary>'
+            f'<div class="dd-panel"><div class="dd-tools">{filt}{mode}</div>'
+            '<div class="dd-up" hidden></div>'
+            f'<div class="dd-list">{"".join(rows)}</div>'
             '<div class="dd-empty" hidden>Nothing matches.</div></div></details>')
 
 
+def _dropdown_3d(idx: dict, current: str, query: dict) -> str:
+    """The 3D dropdown: the whole model, then the saved views as cameras,
+    in the saved views' folders. On the 3D page a pick turns the camera
+    without reloading (view3d.py); elsewhere it opens the 3D page there."""
+    paths = {v["name"]: _folder(v) for v in idx.get("views", [])}
+    entries = [("?3d=1", "Whole model", [])]
+    attrs = {"?3d=1": ' data-cam="0"'}
+    for i, c in enumerate(idx.get("cameras") or []):
+        link = f"?3d=1&cam={i + 1}"
+        entries.append((link, str(c.get("name", "")), paths.get(c.get("name"), [])))
+        attrs[link] = f' data-cam="{i + 1}"'
+    if current:
+        raw = (query.get("cam") or [""])[0]
+        current = (f"?3d=1&cam={raw}" if raw.isdigit()
+                   and 1 <= int(raw) <= len(idx.get("cameras") or []) else "?3d=1")
+    return _dropdown("3D", entries, current, attrs)
+
+
+def _pending(text: str) -> str:
+    return f'<div class="pending"><span>{escape(text)}</span></div>'
+
+
+def _problems(lines: list, title: str = "Some parts did not render:") -> str:
+    lines = [str(x) for x in lines if x]
+    if not lines:
+        return ""
+    return (f'<div class="errors"><strong>{escape(title)}</strong><br>'
+            + "<br>".join(escape(x) for x in lines) + "</div>")
+
+
+def _reader(user: User | None):
+    """Whether ``user`` may see a model, by its name from the data folder
+    (their shares, mcp_http/shares.py). Without a user list: everyone."""
+    if user is None or getattr(auth, "users", None) is None:
+        return lambda name: True
+    acc = auth.users.get(user.name)
+    return lambda name: shares.can_read(acc, name)
+
+
+def _folder_rel(f) -> str:
+    return "" if f.root == folders.DATA_DIR else folders.display_name(f.root)
+
+
 def overview(user: User | None = None) -> bytes:
-    cards = []
+    """Every model, folder by folder, each with a small preview. A model
+    without a current preview gets one rendered (``PREVIEW`` priority)."""
+    may = _reader(user)
+    # A folder shows when the user may see it, or something in it.
+    groups: dict[str, list[str]] = {f.name: [] for f in folders.FOLDERS
+                                    if may(_folder_rel(f) or "*")}
     for m in renderer.models():
-        idx = m["index"]
+        if not may(m["name"]):
+            continue
+        idx, slug = m["index"], m["slug"]
+        if not m["fresh"] or renderer.due(idx, "preview"):
+            renderer.request(slug, "preview", PREVIEW)
         thumb = ""
-        if idx.get("sheets") and idx["sheets"][0].get("file"):
-            thumb = _file_url(idx, idx["sheets"][0]["file"])
-        elif idx.get("views"):
-            thumb = _file_url(idx, idx["views"][0]["file"])
-        img = (f'<img src="{thumb}" alt="" loading="lazy">' if thumb
-               else '<span class="muted">not rendered yet</span>')
+        st = renderer.state(idx, "preview")
+        old = (idx.get("prev") or {}).get("files", {}).get("preview")
+        if st.get("file"):
+            thumb = _file_url(slug, idx["rev"], st["file"])
+        elif old:
+            thumb = _file_url(slug, idx["prev"]["rev"], old)
+        if thumb:
+            img = f'<img src="{thumb}" alt="" loading="lazy">'
+        elif st.get("error") and not renderer.due(idx, "preview"):
+            img = '<span class="muted">no preview</span>'
+        else:
+            img = '<span class="muted">preview…</span>'
         if m["rendering"]:
             status = "rendering…"
+        elif idx.get("errors"):
+            status = "could not be opened"
         elif idx:
             status = (f'{_count(len(idx.get("sheets", [])), "sheet")} · '
-                      f'{_count(len(idx.get("views", [])), "view")}'
-                      + (" · 3D" if idx.get("glb") else "") + f' · {_when(idx)}')
+                      f'{_count(len(idx.get("views", [])), "view")} · {_when(idx)}')
         else:
-            status = "waiting"
-        cards.append(f'<a class="card" href="/m/{quote(m["slug"])}"><div class="thumb">{img}</div>'
-                     f'<div class="body"><div class="name">{escape(m["name"])}</div>'
-                     f'<div class="sub">{status}</div></div></a>')
-    body = (f'<div class="grid">{"".join(cards)}</div>' if cards else
-            '<p class="empty">No .igz files in the data folder yet.</p>')
-    return _page(TITLE, f"<h1>{escape(TITLE)}</h1>", body, user=user)
+            status = "not opened yet"
+        groups.setdefault(m["folder"], []).append(
+            f'<a class="card" href="/m/{quote(slug)}"><div class="thumb">{img}</div>'
+            f'<div class="body"><div class="name">{escape(m["rel"])}</div>'
+            f'<div class="sub">{status}</div></div></a>')
+    if not any(groups.values()):
+        body = '<p class="empty">No .igz files in the model folders yet.</p>'
+    elif len(groups) == 1:
+        body = f'<div class="grid">{"".join(next(iter(groups.values())))}</div>'
+    else:
+        modes = {f.name: f.mode for f in folders.FOLDERS}
+        body = "".join(
+            f'<section class="folder"><h2>{escape(name)}'
+            + (' <span class="tag">read-only</span>' if modes.get(name) == "ro" else "")
+            + "</h2>"
+            + (f'<div class="grid">{"".join(cards)}</div>' if cards
+               else '<p class="muted">No models.</p>') + "</section>"
+            for name, cards in groups.items())
+    return _page(TITLE, f"<h1>{escape(TITLE)}</h1>", body, user=user,
+                 wait=["preview"])
 
 
 def _pick(query: dict, sheets: list, views: list,
@@ -323,19 +544,31 @@ def _pick(query: dict, sheets: list, views: list,
     return ("sheet", 0) if sheets else ("view", 0)
 
 
+def _opening(slug: str, user: User | None, text: str = "Opening the model…") -> bytes:
+    return _page(TITLE, '<a class="btn" href="/">← All models</a>',
+                 f'<p class="empty">{escape(text)} This page refreshes when it is done.</p>',
+                 slug, user=user, wait=["list"])
+
+
 def model_page(slug: str, user: User | None = None,
                query: dict | None = None) -> bytes | None:
     """One model: the sheet or saved view picked in the top bar, one at a
-    time (``?sheet=N`` / ``?view=N``), with Prev/Next through all of them."""
+    time (``?sheet=N`` / ``?view=N``), with Prev/Next through all of them.
+    What is on screen is rendered now if it was not yet, its neighbours
+    next; until then the page shows the model's last picture of it, if
+    there is one."""
+    m = renderer.model(slug)
+    if m is None or not _reader(user)(m.name):
+        return None
+    wait: list[str] = []
+    if not renderer.fresh(slug):
+        renderer.request(slug, "list", NOW)
+        wait.append("list")
     idx = renderer.index(slug)
     if idx is None:
-        if any(m["slug"] == slug for m in renderer.models()):
-            return _page(TITLE, f'<a class="btn" href="/">← All models</a>',
-                         '<p class="empty">Rendering… this page refreshes when it is done.</p>',
-                         slug, user=user)
-        return None
+        return _opening(slug, user)
     sheets, views = idx.get("sheets", []), idx.get("views", [])
-    has_3d = bool(idx.get("glb") or idx.get("glb_note"))
+    has_3d = GLB_MAX_MB > 0 and not idx.get("errors")
     kind, pos = _pick(query or {}, sheets, views, has_3d)
     # Every entry in the order Prev/Next walks: the sheets, then the views.
     entries = ([("sheet", i, s) for i, s in enumerate(sheets)]
@@ -348,27 +581,53 @@ def model_page(slug: str, user: User | None = None,
     sheet_nav = [(link("sheet", i), s["name"], _folder(s)) for i, s in enumerate(sheets)]
     view_nav = [(link("view", i), v["name"], _folder(v)) for i, v in enumerate(views)]
 
-    errors = ""
-    if idx.get("errors"):
-        errors = ('<div class="errors"><strong>Some parts did not render:</strong><br>'
-                  + "<br>".join(escape(e) for e in idx["errors"]) + "</div>")
-    content, step, prefetch = errors, "", ""
+    content = _problems(idx.get("errors") or [], "The model could not be opened:")
+    step = prefetch = ""
     if kind == "3d":
-        content += view3d(idx, _file_url(idx, idx["glb"]) if idx.get("glb") else "")
+        st = renderer.state(idx, "glb")
+        if st.get("file"):
+            content += view3d(_file_url(slug, idx["rev"], st["file"]),
+                              idx.get("cameras") or [], st.get("mb"))
+        elif st.get("note"):
+            content += f'<p class="empty">{escape(st["note"])}</p>'
+        elif renderer.due(idx, "glb"):
+            renderer.request(slug, "glb", NOW)
+            wait.append("glb")
+            content += _pending("Preparing the 3D model…")
+        else:
+            content += _problems([st.get("error")], "The 3D model could not be made:")
     elif entries:
         at = next(n for n, (k, i, _) in enumerate(entries) if (k, i) == (kind, pos))
         item = entries[at][2]
+        key = f"{kind}:{pos + 1}"
+        renderer.viewed(slug, key, item["name"])
+        st = renderer.state(idx, key)
         path = _folder(item)
         extra = ("" if kind == "view" or item.get("printed", True)
                  else ' <span class="muted">(not printed)</span>')
         where = f'<span class="muted">{escape(SEP.join(path))}</span>' if path else ""
         count = len(sheets) if kind == "sheet" else len(views)
-        if item.get("file"):
-            url = _file_url(idx, item["file"])
+        before = idx.get("prev") or {}
+        old = (before.get("files") or {}).get(f"{kind}:{item['name']}")
+        url = ""
+        if st.get("file"):
+            url = _file_url(slug, idx["rev"], st["file"])
+        else:
+            if old:
+                url = _file_url(slug, before["rev"], old)
+            if renderer.due(idx, key):
+                renderer.request(slug, key, NOW)
+                wait.append(key)
+                if old:
+                    extra += ' <span class="muted">(updating…)</span>'
+            elif st.get("error"):
+                content += _problems([st["error"]], f"This {kind} did not render:")
+        content += _problems(st.get("warnings") or [])
+        if url:
             img = (f'<a class="img" href="{url}" target="_blank" title="Open full size">'
                    f'<img src="{url}" alt="{escape(item["name"])}"></a>')
         else:
-            img = '<p class="empty">not rendered</p>'
+            img = _pending("Rendering…" if key in wait else "not rendered")
         content += (f'<figure class="one">{img}<figcaption><strong>{escape(item["name"])}</strong>'
                     f'{extra}<span class="muted">{kind.capitalize()} {pos + 1} of {count}</span>'
                     f'<span class="spacer"></span>{where}</figcaption></figure>')
@@ -379,25 +638,54 @@ def model_page(slug: str, user: User | None = None,
                     f'title="Previous: {escape(prev["name"])} (←)" aria-label="Previous">‹</a>'
                     f'<a class="btn" id="next" href="{link(next_k, next_i)}" '
                     f'title="Next: {escape(nxt["name"])} (→)" aria-label="Next">›</a></span>')
-            # The neighbours' images load in the background: stepping is instant.
-            prefetch = "".join(f'<link rel="prefetch" href="{_file_url(idx, e["file"])}">'
-                               for e in (prev, nxt) if e.get("file"))
-    elif idx.get("errors"):
-        content += '<p class="empty">Nothing could be rendered (see above).</p>'
-    else:
+            # The neighbours: rendered next, and loaded in the background
+            # once they are, so stepping is instant.
+            for k, i in ((prev_k, prev_i), (next_k, next_i)):
+                n_key = f"{k}:{i + 1}"
+                n_st = renderer.state(idx, n_key)
+                if n_st.get("file"):
+                    prefetch += (f'<link rel="prefetch" '
+                                 f'href="{_file_url(slug, idx["rev"], n_st["file"])}">')
+                elif renderer.due(idx, n_key):
+                    renderer.request(slug, n_key, NEXT)
+    elif not idx.get("errors"):
         content += '<p class="empty">This model has no sheets and no saved views.</p>'
-    pdf = (f'<a class="btn" href="{_file_url(idx, idx["pdf"])}" target="_blank">PDF</a>'
-           if idx.get("pdf") else "")
-    navs = _dropdown("View", view_nav, current) + _dropdown("Sheet", sheet_nav, current)
+    pdf = ('<a class="btn" href="?pdf=1" target="_blank" title="All sheets as one PDF">PDF</a>'
+           if WITH_PDF and sheets else "")
+    navs = _dropdown("View", view_nav, current)
     if has_3d:
-        on = ' on" aria-current="page' if kind == "3d" else ""
-        navs += (f'<a class="btn{on}" href="?3d=1" title="The model in 3D: '
-                 'drag to turn it, wheel to zoom">3D</a>')
+        navs += _dropdown_3d(idx, current if kind == "3d" else "", query or {})
+    navs += _dropdown("Sheet", sheet_nav, current)
     header = (f'<a class="btn" href="/" title="All models">←</a>'
               f'<h1 title="{escape(idx["name"])}">{escape(idx["name"])}</h1>'
               + (f'<nav class="navs">{navs}</nav>' if navs else "") + step
-              + f'<span class="spacer"></span><span class="meta">rendered {_when(idx)}</span>{pdf}')
-    return _page(f'{idx["name"]} – {TITLE}', header, prefetch + content, slug, bar=True, user=user)
+              + f'<span class="spacer"></span><span class="meta">read {_when(idx)}</span>{pdf}')
+    return _page(f'{idx["name"]} – {TITLE}', header, prefetch + content, slug,
+                 bar=True, user=user, wait=wait)
+
+
+def pdf_page(slug: str, user: User | None = None) -> tuple[bytes | None, str]:
+    """``?pdf=1``: (a page, "") while the sheets' PDF is made, or (None,
+    its URL) when it is there."""
+    if not renderer.fresh(slug):
+        renderer.request(slug, "list", NOW)
+        return _opening(slug, user, "Reading the model before making the PDF…"), ""
+    idx = renderer.index(slug)
+    if idx is None:
+        return _opening(slug, user), ""
+    st = renderer.state(idx, "pdf")
+    if st.get("file"):
+        return None, _file_url(slug, idx["rev"], st["file"])
+    back = f'<a class="btn" href="/m/{quote(slug)}">← {escape(idx["name"])}</a>'
+    if not WITH_PDF or not idx.get("sheets"):
+        return _page(TITLE, back, '<p class="empty">There is no PDF of this model.</p>',
+                     slug, user=user), ""
+    if renderer.due(idx, "pdf"):
+        renderer.request(slug, "pdf", NOW)
+        return _page(TITLE, back, _pending("Making the PDF of all sheets…"),
+                     slug, user=user, wait=["pdf"]), ""
+    return _page(TITLE, back, _problems([st.get("error")], "The PDF could not be made:"),
+                 slug, user=user), ""
 
 
 COOKIE = "itz_viewer"
@@ -419,6 +707,8 @@ background:var(--bg);color:var(--fg);font:inherit}
 background:var(--accent);color:#fff;font:inherit;font-weight:600;cursor:pointer}
 .login .go:hover{text-decoration:none}.login p{margin:0 0 8px}
 .err{color:#c0392b;font-size:14px;margin:0 0 8px}
+.login .guest{margin:0}.login button.alt{background:transparent;color:var(--accent);border:1px solid var(--line);font-weight:500}
+.login button.alt:hover{border-color:var(--accent)}
 """
 
 
@@ -429,13 +719,26 @@ def _card(title: str, inner: str) -> bytes:
 <body><main><div class="login"><h1>{escape(TITLE)}</h1>{inner}</div></main></body></html>""".encode("utf-8")
 
 
+def _guest_button(nxt: str) -> str:
+    """"Log in as guest" (VIEWER_GUEST), under the login."""
+    if not getattr(auth, "guest", False):
+        return ""
+    return (f'<form method="post" action="/login/guest" class="guest">'
+            f'<input type="hidden" name="next" value="{escape(nxt)}">'
+            '<button type="submit" class="alt">Log in as guest</button></form>')
+
+
 def login_page(error: str, nxt: str) -> bytes:
     err = f'<p class="err">{escape(error)}</p>' if error else ""
+    if auth.mode == "oidc":                    # a choice: the provider or a guest
+        go = "/auth/login?" + urlencode({"next": nxt})
+        return _card("Log in", f'{err}<a class="go" href="{escape(go)}">Log in</a>'
+                               + _guest_button(nxt))
     return _card("Log in", f"""<form method="post" action="/login">{err}
 <input type="hidden" name="next" value="{escape(nxt)}">
-<label for="u">User</label><input id="u" name="user" autocomplete="username" value="{escape(auth.user_name)}">
-<label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" autofocus>
-<button type="submit">Log in</button></form>""")
+<label for="u">User</label><input id="u" name="user" autocomplete="username" autofocus>
+<label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password">
+<button type="submit">Log in</button></form>""" + _guest_button(nxt))
 
 
 def message_page(text: str, link: str = "", label: str = "", extra: str = "") -> bytes:
@@ -483,7 +786,7 @@ class Handler(BaseHTTPRequestHandler):
             user, _, pw = base64.b64decode(value[6:]).decode().partition(":")
         except ValueError:
             return None
-        return User(user, "admin") if auth.credentials_ok(user, pw) else None
+        return auth.login(user, pw)
 
     def _user(self) -> User | None:
         if auth.mode == "none":
@@ -491,9 +794,12 @@ class Handler(BaseHTTPRequestHandler):
         if auth.mode == "proxy":
             return auth.from_proxy(self.client_address[0], self.headers)
         user = self._cookie_user()
-        if user is None and auth.mode == "local":
-            user = self._basic_user()
-        return user
+        if user is not None:
+            # As the user list has them now (switched off, another role).
+            return auth.current(user)
+        if auth.mode == "local":
+            return self._basic_user()
+        return None
 
     def _authorised(self, path: str) -> User | None:
         user = self._user()
@@ -502,7 +808,16 @@ class Handler(BaseHTTPRequestHandler):
         wants_html = "text/html" in self.headers.get("Accept", "")
         page = wants_html and not path.startswith(("/files/", "/events"))
         target = self.path if self.path.startswith("/") else "/"
-        if auth.mode == "proxy":
+        if self._is_disabled():
+            if page:
+                self._html(403, message_page(
+                    "Your account may not use this viewer (switched off, or MCP only). "
+                    "Ask an admin of this viewer.",
+                    "/logout" if auth.mode != "proxy" else "", "Log out"),
+                    {"Set-Cookie": f"{COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"})
+            else:
+                self._send(403, b"account switched off\n", "text/plain")
+        elif auth.mode == "proxy":
             if page:
                 self._html(401, message_page(
                     "This viewer is reached through its login proxy, which did "
@@ -511,7 +826,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(401, b"authentication required (through the proxy)\n",
                            "text/plain")
         elif page:
-            where = "/login" if auth.mode == "local" else "/auth/login"
+            where = "/login" if auth.mode == "local" or auth.guest else "/auth/login"
             self._send(303, b"", "text/plain",
                        {"Location": where + "?next=" + quote(target, safe="")})
         elif auth.mode == "local":
@@ -520,6 +835,14 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(401, b"authentication required\n", "text/plain")
         return None
+
+    def _is_disabled(self) -> bool:
+        """Whether whoever asks is a known user an admin switched off."""
+        if auth.mode == "proxy":
+            found = auth.proxy.user(self.client_address[0], self.headers)
+            return bool(found) and auth.disabled(found[0])
+        user = self._cookie_user()
+        return user is not None and auth.disabled(user.name)
 
     def _secure(self) -> bool:
         return (self.headers.get("X-Forwarded-Proto", "").lower() == "https"
@@ -537,18 +860,75 @@ class Handler(BaseHTTPRequestHandler):
         return (f"{COOKIE}={auth.sessions.issue(user)}; Path=/; HttpOnly; SameSite=Lax; "
                 f"Max-Age={auth.sessions.max_age}" + ("; Secure" if self._secure() else ""))
 
+    def _form(self) -> dict:
+        length = min(int(self.headers.get("Content-Length") or 0), 16384)
+        return parse_qs(self.rfile.read(length).decode("utf-8", "replace"),
+                        keep_blank_values=True)
+
     def do_POST(self):
         path = urlsplit(self.path).path
-        if path != "/login" or auth.mode != "local":
-            return self._send(404, b"not found\n", "text/plain")
-        length = min(int(self.headers.get("Content-Length") or 0), 4096)
-        form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
-        user = (form.get("user") or [""])[0]
+        if path == "/login" and auth.mode == "local":
+            return self._post_login()
+        if path == "/login/guest" and auth.guest:
+            nxt = _safe_next((self._form().get("next") or ["/"])[0])
+            user = auth.guest_login()
+            if user is None:
+                return self._login_page(403, "Guests may not log in at the moment.", nxt)
+            return self._send(303, b"", "text/plain", {
+                "Location": nxt, "Set-Cookie": self._session_cookie(user)})
+        if path == "/account/settings" and auth.mode != "none":
+            return self._post_settings()
+        if path in ("/admin", "/account") and auth.mode != "none":
+            user = self._authorised(path)
+            if user is None:
+                return None
+            form = self._form()
+            if not hmac.compare_digest((form.get("csrf") or [""])[0],
+                                       auth.sessions.csrf(user.name)):
+                return self._html(403, message_page("The form expired; open it again.",
+                                                    path, "Back"))
+            if path == "/admin":
+                if not user.admin:
+                    return self._send(403, b"admins only\n", "text/plain")
+                note, error = admin.act(auth, user, form)
+                if (form.get("action") or [""])[0] == "shares":
+                    return self._html(400 if error else 200, admin.shares_page(
+                        auth, user, (form.get("name") or [""])[0], note, error, TITLE))
+                return self._html(400 if error else 200,
+                                  admin.page(auth, user, note, error, TITLE))
+            note, error = admin.act_account(auth, user, form)
+            return self._html(400 if error else 200,
+                              admin.account_page(auth, user, note, error, TITLE))
+        return self._send(404, b"not found\n", "text/plain")
+
+    def _post_settings(self):
+        """A setting the page's script changed: JSON back, all settings."""
+        user = self._authorised("/account/settings")
+        if user is None:
+            return None
+        form = self._form()
+        if not hmac.compare_digest((form.get("csrf") or [""])[0],
+                                   auth.sessions.csrf(user.name)):
+            return self._send(403, b'{"error": "csrf"}', "application/json")
+        changes = {k: admin.setting_value(k, v[0]) for k, v in form.items() if k != "csrf"}
+        try:
+            conf = auth.users.set_settings(user.name, changes)
+        except UserError as exc:
+            return self._send(400, json.dumps({"error": str(exc)}).encode(), "application/json")
+        return self._send(200, json.dumps(conf).encode(), "application/json",
+                          {"Cache-Control": "no-store"})
+
+    def _post_login(self):
+        form = self._form()
+        name = (form.get("user") or [""])[0].strip()
         pw = (form.get("password") or [""])[0]
         nxt = _safe_next((form.get("next") or ["/"])[0])
-        if auth.credentials_ok(user, pw):
+        user = auth.login(name, pw)
+        if user is None and auth.users.authenticate(name, pw) is not None:
+            return self._login_page(403, "This account may not use the web viewer.", nxt)
+        if user is not None:
             return self._send(303, b"", "text/plain", {
-                "Location": nxt, "Set-Cookie": self._session_cookie(User(user, "admin"))})
+                "Location": nxt, "Set-Cookie": self._session_cookie(user)})
         time.sleep(0.7)                          # slows down guessing
         return self._login_page(401, "Wrong user name or password.", nxt)
 
@@ -560,7 +940,7 @@ class Handler(BaseHTTPRequestHandler):
         nxt = _safe_next((query.get("next") or ["/"])[0])
         clear = f"{COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
         if path == "/login":
-            if auth.mode == "local":
+            if auth.mode == "local" or auth.guest:
                 self._login_page(nxt=nxt)
             elif auth.mode == "oidc":
                 self._send(303, b"", "text/plain",
@@ -572,6 +952,9 @@ class Handler(BaseHTTPRequestHandler):
             if auth.mode == "local":
                 self._send(303, b"", "text/plain",
                            {"Location": "/login", "Set-Cookie": clear})
+            elif auth.mode == "oidc" and self._cookie_user() is not None \
+                    and self._cookie_user().source == "guest":
+                self._send(303, b"", "text/plain", {"Location": "/login", "Set-Cookie": clear})
             elif auth.mode == "oidc":
                 end = auth.oidc.end_session()
                 extra = (f'<p class="muted"><a href="{escape(end)}?'
@@ -594,14 +977,18 @@ class Handler(BaseHTTPRequestHandler):
             if query.get("error"):
                 raise ValueError(f"the provider said: {query['error'][0]} "
                                  + (query.get("error_description") or [""])[0])
-            user, groups, nxt = auth.oidc.finish((query.get("code") or [""])[0],
+            name, groups, nxt = auth.oidc.finish((query.get("code") or [""])[0],
                                                  (query.get("state") or [""])[0])
         except (OSError, ValueError) as exc:
             log(f"viewer: OIDC login failed: {exc}")
             self._html(502 if isinstance(exc, OSError) else 400, message_page(
                 f"The login did not work: {exc}", "/auth/login", "Try again"))
             return True
-        auth.logged_in(user, groups)
+        user = auth.logged_in(name, groups)
+        if user is None:
+            self._html(403, message_page(
+                "Your account is switched off. Ask an admin of this viewer."))
+            return True
         self._send(303, b"", "text/plain",
                    {"Location": _safe_next(nxt), "Set-Cookie": self._session_cookie(user)})
         return True
@@ -620,24 +1007,55 @@ class Handler(BaseHTTPRequestHandler):
         nocache = {"Cache-Control": "no-store"}
         if path == "/":
             return self._send(200, overview(user), html, nocache)
+        if path == "/admin" and auth.mode != "none":
+            if not user.admin:
+                return self._html(403, message_page("Only admins manage the users.", "/", "Back"))
+            return self._html(200, admin.page(auth, user, title=TITLE))
+        if path == "/admin/shares" and auth.mode != "none":
+            if not user.admin:
+                return self._html(403, message_page("Only admins manage the users.", "/", "Back"))
+            name = (parse_qs(parts.query).get("name") or [""])[0]
+            return self._html(200, admin.shares_page(auth, user, name, title=TITLE))
+        if path.startswith("/avatar/") and path.endswith(".svg") and auth.mode != "none":
+            from urllib.parse import unquote
+            acc = auth.users.get(unquote(path[8:-4]))
+            if acc is None:
+                return self._send(404, b"not found\n", "text/plain")
+            return self._send(200, avatar.svg(acc.name, acc.avatar).encode(),
+                              "image/svg+xml", {"Cache-Control": "private, max-age=86400",
+                                                "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'"})
+        if path == "/account" and auth.mode != "none":
+            return self._html(200, admin.account_page(auth, user, title=TITLE))
         if path.startswith("/m/"):
             slug = path[3:]
-            page = (model_page(slug, user, parse_qs(parts.query))
-                    if _SAFE.match(slug) else None)
+            query = parse_qs(parts.query)
+            m = renderer.model(slug) if _SAFE.match(slug) else None
+            if m is None or not _reader(user)(m.name):
+                return self._send(404, b"no such model\n", "text/plain")
+            if (query.get("pdf") or [""])[0] not in ("", "0"):
+                page, url = pdf_page(slug, user)
+                if page is None:
+                    return self._send(303, b"", "text/plain", {"Location": url})
+                return self._send(200, page, html, nocache)
+            page = model_page(slug, user, query)
             if page is None:
                 return self._send(404, b"no such model\n", "text/plain")
             return self._send(200, page, html, nocache)
         if path.startswith("/files/"):
+            m = renderer.model(path[7:].split("/")[0])
+            if m is None or not _reader(user)(m.name):
+                return self._send(404, b"not found\n", "text/plain")
             return self._file(path[7:])
         if path.startswith("/static/three/"):
             return self._static(path[len("/static/three/"):])
         if path == "/events":
-            return self._events()
+            return self._events(user)
         return self._send(404, b"not found\n", "text/plain")
 
     def _file(self, rest: str):
         parts = rest.split("/")
-        if len(parts) != 3 or not all(_SAFE.match(p) for p in parts):
+        if len(parts) != 3 or not all(_SAFE.match(p) and not p.startswith(".")
+                                      for p in parts):
             return self._send(404, b"not found\n", "text/plain")
         f = CACHE_DIR.joinpath(*parts)
         if not f.is_file():
@@ -661,7 +1079,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, f.read_bytes(), ctype,
                           {"Cache-Control": "private, max-age=86400"})
 
-    def _events(self):
+    def _events(self, user: User | None = None):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
@@ -678,10 +1096,17 @@ class Handler(BaseHTTPRequestHandler):
             while True:
                 with cond:
                     cond.wait_for(lambda: renderer.generation != seen, timeout=15)
-                    gen, event = renderer.generation, dict(renderer.last_event)
-                if gen != seen:
-                    seen = gen
+                # Every event since the last one sent: a "done" may come
+                # right before an "idle".
+                events = renderer.events_since(seen)
+                may = _reader(user)              # shares may change meanwhile
+                for event in events:
+                    m = renderer.model(event["slug"]) if event.get("slug") else None
+                    if event.get("slug") and m is not None and not may(m.name):
+                        continue
                     self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
+                if events:
+                    seen = events[-1]["generation"]
                 else:
                     self.wfile.write(b": keepalive\n\n")
                 self.wfile.flush()
@@ -709,7 +1134,9 @@ def main() -> None:
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, name="http", daemon=True).start()
-    log(f"viewer on :{port} (auth: {auth.describe()}); cache {CACHE_DIR}")
+    log(f"viewer on :{port} (auth: {auth.describe()}); cache {CACHE_DIR}; "
+        f"prerender {PRERENDER}; model folders: "
+        + "; ".join(f.describe() for f in folders.FOLDERS))
     app.start(None, allow_save=False)
     renderer.run()
 

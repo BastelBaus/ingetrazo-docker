@@ -7,8 +7,17 @@ stream (405). ``GET /healthz`` is the container's health probe.
 
 Every request goes to IngeTrazo's own MCP handler (scripts/ingetrazo_mcp.py),
 so the tools and their descriptions are the app's. The container adds:
-``list_documents``, the confinement of file paths to the data folder, and
-hides ``shutdown`` (the container's lifetime is the orchestrator's).
+``list_documents`` (the model folders and their files), the confinement of
+file paths to the model folders (writing only into read/write ones, see
+folders.py), and hides ``shutdown`` (the container's lifetime is the
+orchestrator's).
+
+A caller who is a user of the user list (auth.py) and not an admin is
+held to their folders (shares.py): they list, open and use only what they
+may read, and save and export only where they may write. ``run_python``
+(``ADMIN_TOOLS``) is not theirs: Python in the container reaches every
+file, which would make the folders meaningless. There is one IngeTrazo
+and one open document for every caller.
 """
 from __future__ import annotations
 
@@ -21,28 +30,38 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-from .appbridge import (DATA_DIR, App, env_flag, initial_model, list_models,
-                        log, resolve_data_path)
-from .auth import Auth
+from pathlib import Path
+
+from . import folders, shares
+from .appbridge import DATA_DIR, App, env_flag, initial_model, log
+from .auth import FULL, Auth, Caller
 
 #: Protocol revisions this server can speak; the tool and content shapes it
 #: uses are the same in all of them.
 KNOWN_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 HIDDEN_TOOLS = {"shutdown"}
-#: Tools whose ``path`` argument names a file: confined to the data folder.
-PATH_TOOLS = {"open_document": True, "save_document": False,
-              "export_pdf": False, "export_view": False}
+#: Tools only callers with every right (admins, MCP_TOKEN) get.
+ADMIN_TOOLS = {"run_python"}
+#: Tools whose ``path`` argument names a file, confined to the model
+#: folders: (writes it, must exist). A tool that writes needs a read/write
+#: folder.
+PATH_TOOLS = {"open_document": (False, True), "import_file": (False, True),
+              "save_document": (True, False), "export_pdf": (True, False),
+              "export_view": (True, False), "export_file": (True, False),
+              "render_sheet": (True, False), "screenshot": (True, False)}
 
 LIST_DOCUMENTS = {
     "name": "list_documents",
     "description": (
         "List the document open in IngeTrazo (open_documents: its "
-        "document_id, which every other tool needs) and the documents (.igz) "
-        "in the container's data folder, with size, modification time and "
-        "which one is open. After open_document the document_id changes: "
-        "use the one it returns, or call this again. Paths for "
-        "open_document, save_document and the export tools are relative to "
-        "the data folder (absolute paths must lie inside it)."),
+        "document_id, which every other tool needs) and the model folders "
+        "with their documents (.igz): size, modification time and which "
+        "one is open. After open_document the document_id changes: use the "
+        "one it returns, or call this again. Paths for open_document, "
+        "save_document, import and the export tools are relative to the "
+        "data folder, as listed here (e.g. <folder>/<file>.igz; absolute "
+        "paths must lie inside it). A folder with mode 'ro' is read-only: "
+        "save and export into an 'rw' one."),
     "inputSchema": {"type": "object", "properties": {}},
 }
 
@@ -57,48 +76,114 @@ def _text(result: object, is_error: bool = False) -> dict:
     return {"content": [{"type": "text", "text": text}], "isError": is_error}
 
 
-def _list_documents() -> dict:
+def _open_path() -> tuple[list, str | None]:
     """IngeTrazo's own listing (the live document and its ids) and the
-    data folder's models."""
+    open document's path."""
     reply = app.call("list_documents")
     live = ((reply.get("result") or {}).get("documents") or []
             if reply.get("ok") else [])
-    open_path = live[0].get("path") if live else None
-    docs = []
-    for p in list_models():
-        st = p.stat()
-        docs.append({
-            "path": str(p.relative_to(DATA_DIR)).replace(os.sep, "/"),
-            "size_bytes": st.st_size,
-            "modified": datetime.fromtimestamp(
-                st.st_mtime, timezone.utc).isoformat(timespec="seconds"),
-            "open": open_path is not None and str(p) == str(open_path),
-        })
+    return live, (live[0].get("path") if live else None)
+
+
+def _rel(path) -> str | None:
+    """A path as named from the data folder; None outside it."""
+    try:
+        return folders.display_name(Path(path).resolve())
+    except (ValueError, OSError):
+        return None
+
+
+def _list_documents(caller: Caller = FULL) -> dict:
+    """The live document and the model folders with their models (a
+    restricted caller: those they may read)."""
+    live, open_path = _open_path()
+    acc = caller.account if caller.restricted else None
+    if acc is not None and open_path and not shares.can_read(acc, _rel(open_path) or ""):
+        live = [{"note": "a document you have no access to is open"}]
+    groups = []
+    for folder in folders.FOLDERS:
+        docs = []
+        mode = folder.mode
+        if acc is not None:
+            base = _rel(folder.root) or ""
+            mode = shares.effective(acc, base or "*")
+        for p in folder.models():
+            if acc is not None and not shares.can_read(acc, folders.display_name(p)):
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            docs.append({
+                "path": folders.display_name(p),
+                "size_bytes": st.st_size,
+                "modified": datetime.fromtimestamp(
+                    st.st_mtime, timezone.utc).isoformat(timespec="seconds"),
+                "open": open_path is not None and str(p) == str(open_path),
+            })
+        if acc is not None and not docs and mode == "none":
+            continue
+        groups.append({"name": folder.name, "path": str(folder.root),
+                       "mode": mode if acc is None else {"rw": "rw", "r": "ro"}.get(mode, "ro"),
+                       "documents": docs})
     return _text({"open_documents": live, "data_folder": str(DATA_DIR),
-                  "documents": docs})
+                  "folders": groups})
 
 
-def _handle(msg: dict) -> dict | None:
+def _allowed(caller: Caller, path, write: bool) -> None:
+    """A restricted caller's folders (shares.py); PermissionError if not."""
+    if not caller.restricted:
+        return
+    rel = _rel(path) or ""
+    ok = (shares.can_write if write else shares.can_read)(caller.account, rel)
+    if not ok:
+        raise PermissionError(
+            f"{caller.account.name} may not {'write' if write else 'read'} {rel or path}: "
+            "ask an admin to share the folder" + (" with read & write" if write else ""))
+
+
+def _confine(name: str, args: dict, caller: Caller = FULL) -> None:
+    """Paths into the model folders (and the caller's); raises
+    PermissionError or FileNotFoundError with a message for the agent."""
+    write, must_exist = PATH_TOOLS[name]
+    if args.get("path"):
+        args["path"] = str(folders.resolve(str(args["path"]), write=write,
+                                           must_exist=must_exist))
+        _allowed(caller, args["path"], write)
+    elif name == "save_document":
+        # Saved to its own path: that must be in a read/write folder too.
+        _, open_path = _open_path()
+        if open_path:
+            folders.resolve(str(open_path), write=True)
+            _allowed(caller, open_path, True)
+
+
+def _handle(msg: dict, caller: Caller = FULL) -> dict | None:
     method = msg.get("method")
     msg_id = msg.get("id")
     if method == "tools/call":
         params = msg.get("params") or {}
         name = params.get("name", "")
         args = dict(params.get("arguments") or {})
-        if name in HIDDEN_TOOLS:
+        if name in HIDDEN_TOOLS or (caller.restricted and name in ADMIN_TOOLS):
             return {"jsonrpc": "2.0", "id": msg_id,
-                    "result": _text(f"{name} is not available in the container",
+                    "result": _text(f"{name} is not available"
+                                    + (" to you" if name in ADMIN_TOOLS else " in the container"),
                                     is_error=True)}
         if name == "list_documents":
-            return {"jsonrpc": "2.0", "id": msg_id, "result": _list_documents()}
-        if name in PATH_TOOLS and args.get("path"):
-            try:
-                args["path"] = str(resolve_data_path(
-                    str(args["path"]), must_exist=PATH_TOOLS[name]))
-            except (PermissionError, FileNotFoundError) as exc:
-                return {"jsonrpc": "2.0", "id": msg_id,
-                        "result": _text(str(exc), is_error=True)}
-            msg = {**msg, "params": {**params, "arguments": args}}
+            return {"jsonrpc": "2.0", "id": msg_id, "result": _list_documents(caller)}
+        try:
+            if name in PATH_TOOLS:
+                _confine(name, args, caller)
+                msg = {**msg, "params": {**params, "arguments": args}}
+            if caller.restricted and not (name == "open_document" and args.get("path")):
+                # Every other tool works on the open document.
+                _, open_path = _open_path()
+                if open_path:
+                    _allowed(caller, open_path, False)
+        except (PermissionError, FileNotFoundError) as exc:
+            return {"jsonrpc": "2.0", "id": msg_id,
+                    "result": _text(str(exc), is_error=True)}
     reply = app.handle(msg)
     if reply is None:
         return None
@@ -111,8 +196,8 @@ def _handle(msg: dict) -> dict | None:
     elif method == "tools/list":
         # The app's list_documents gives way to the container's, which
         # includes it.
-        tools = [t for t in reply["result"]["tools"]
-                 if t.get("name") not in HIDDEN_TOOLS | {"list_documents"}]
+        hidden = HIDDEN_TOOLS | {"list_documents"} | (ADMIN_TOOLS if caller.restricted else set())
+        tools = [t for t in reply["result"]["tools"] if t.get("name") not in hidden]
         reply["result"]["tools"] = tools + [LIST_DOCUMENTS]
     return reply
 
@@ -162,12 +247,13 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return (urlsplit(origin).hostname or "") in ("localhost", "127.0.0.1", "::1")
 
-    def _authorised(self) -> bool:
-        if auth.check(self.headers):
-            return True
+    def _authorised(self) -> Caller | None:
+        caller = auth.caller(self.headers)
+        if caller is not None:
+            return caller
         self._json(401, {"error": "unauthorized"}, headers={
             "WWW-Authenticate": auth.challenge(self.base_url())})
-        return False
+        return None
 
     # ---- routes -------------------------------------------------------------
     def do_GET(self):
@@ -206,7 +292,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": "not found"})
         if not self._origin_ok():
             return self._json(403, {"error": "origin not allowed"})
-        if not self._authorised():
+        caller = self._authorised()
+        if caller is None:
             return None
         length = int(self.headers.get("Content-Length") or 0)
         try:
@@ -227,7 +314,7 @@ class Handler(BaseHTTPRequestHandler):
             if "method" not in m:           # a client's response: nothing to do
                 continue
             try:
-                r = _handle(m)
+                r = _handle(m, caller)
             except Exception as exc:        # never drop the connection silently
                 log(f"error handling {m.get('method')}: {exc!r}")
                 r = None if m.get("id") is None else {
@@ -251,7 +338,8 @@ def main() -> None:
     import threading
     threading.Thread(target=server.serve_forever, name="http",
                      daemon=True).start()
-    log(f"MCP endpoint on :{port}/mcp (auth: {auth.mode}); data folder {DATA_DIR}")
+    log(f"MCP endpoint on :{port}/mcp (auth: {auth.mode}); model folders: "
+        + "; ".join(f.describe() for f in folders.FOLDERS))
     app.start(initial_model(), allow_save=env_flag("INGETRAZO_ALLOW_SAVE", True),
               save_format=os.environ.get("INGETRAZO_SAVE_FORMAT") or None)
     while True:

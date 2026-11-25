@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """The model page's 3D view: the model's GLB (render.py) in three.js, turned
 with the mouse or a finger (OrbitControls), with the edges drawn as lines
-and the saved views as camera presets.
+and the saved views as camera presets – picked in the top bar's 3D
+dropdown (server.py), which turns the camera here without a reload.
 
 three.js is not in this repo: the Dockerfile fetches a pinned release
 (checksummed) into ``viewer/static/three/``, and server.py serves it under
@@ -23,14 +24,14 @@ figure.stage{margin:0;display:flex;flex-direction:column}
 color:#6b6b66;font-size:14px;pointer-events:none;text-align:center;padding:16px}
 .stage .status[hidden]{display:none}
 .stage figcaption{flex-wrap:wrap;align-items:center}
-.stage select{border:1px solid var(--line);background:var(--card);color:var(--fg);padding:4px 6px;border-radius:6px;font:inherit;font-size:13px;max-width:min(320px,60vw)}
 .stage .btn{cursor:pointer;font:inherit;font-size:13px}
 @media (max-width:820px){.stage .canvas{height:70vh}.stage .hint{display:none}}
 """
 
 #: The 3D view's script. Reads its settings from the stage's data-*
 #: attributes; keeps the camera across the page's live reloads
-#: (sessionStorage) and the edge switch across visits (localStorage).
+#: (sessionStorage) and the edge switch in the user's settings (without
+#: an account: localStorage).
 JS = r"""
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -39,7 +40,26 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 const stage = document.getElementById('stage');
 const box = stage.querySelector('.canvas');
 const status = stage.querySelector('.status');
-const pick = document.getElementById('cam');
+// The 3D dropdown of the top bar: its entries name a camera (data-cam,
+// 0 = the whole model); a pick turns the camera here instead of reloading.
+const dd = document.querySelector('details.dd[data-kind="3d"]');
+let cur = -1;                         // the camera picked, -1: none
+function mark(i) {
+  cur = i;
+  if (!dd) return;
+  let label = null;
+  dd.querySelectorAll('a[data-cam]').forEach((a) => {
+    const on = +a.dataset.cam === i + 1;
+    a.classList.toggle('on', on);
+    if (on) { a.setAttribute('aria-current', 'page'); label = a; } else a.removeAttribute('aria-current');
+  });
+  const span = dd.querySelector('summary .cur');
+  if (span && label) {
+    span.className = 'cur';
+    span.textContent = label.textContent;
+    span.title = (label.dataset.folder ? label.dataset.folder + ' \u203a ' : '') + label.textContent;
+  }
+}
 const edgeBtn = document.getElementById('edges');
 const cameras = JSON.parse(stage.dataset.cameras || '[]');
 const camKey = 'cam3d:' + (document.body.dataset.slug || '');
@@ -142,23 +162,39 @@ function showEdges(on) {
   if (edges) edges.visible = on;
   edgeBtn.classList.toggle('on', on);
   edgeBtn.setAttribute('aria-pressed', String(on));
-  store(localStorage, 'edges3d', on ? '1' : '0');
   draw();
 }
 
-edgeBtn.addEventListener('click', () => showEdges(!(edges && edges.visible)));
-document.getElementById('fit').addEventListener('click', () => { pick.value = ''; fit(); });
-pick.addEventListener('change', () => {
-  preset(pick.value === '' ? -1 : +pick.value);
+function saveEdges(on) {
+  if (document.body.dataset.csrf && window.saveSetting) window.saveSetting('edges_3d', on ? 1 : 0);
+  else store(localStorage, 'edges3d', on ? '1' : '0');
+}
+
+edgeBtn.addEventListener('click', () => {
+  const on = !(edges && edges.visible);
+  showEdges(on);
+  saveEdges(on);
+});
+function choose(i) {
+  mark(i);
+  preset(i);
   // The address names the camera, so a link opens the same one (?3d=1&cam=N).
   const u = new URL(location.href);
-  if (pick.value === '') u.searchParams.delete('cam'); else u.searchParams.set('cam', String(+pick.value + 1));
+  if (i < 0) u.searchParams.delete('cam'); else u.searchParams.set('cam', String(i + 1));
   history.replaceState(null, '', u);
+}
+document.getElementById('fit').addEventListener('click', () => choose(-1));
+if (dd) dd.addEventListener('click', (e) => {
+  const a = e.target.closest('a[data-cam]');
+  if (!a || e.ctrlKey || e.metaKey || e.shiftKey || e.button) return;
+  e.preventDefault();
+  dd.open = false;
+  choose(+a.dataset.cam - 1);
 });
 // A render that finished reloads the page: the camera stays where it was.
 window.addEventListener('pagehide', () => store(sessionStorage, camKey, JSON.stringify({
   p: camera.position.toArray(), t: controls.target.toArray(), f: camera.fov,
-  c: pick.value === '' ? -1 : +pick.value })));
+  c: cur })));
 
 say('Loading the 3D model…');
 new GLTFLoader().load(stage.dataset.glb, (gltf) => {
@@ -178,10 +214,10 @@ new GLTFLoader().load(stage.dataset.glb, (gltf) => {
   try { kept = JSON.parse(load(sessionStorage, camKey) || 'null'); } catch (e) {}
   const start = +(new URL(location.href).searchParams.get('cam') || 0) - 1;
   if (cameras[start] && !(kept && kept.c === start)) {
-    pick.value = String(start);
+    mark(start);
     preset(start);
   } else if (kept && kept.p && kept.t) {
-    if (cameras[kept.c]) pick.value = String(kept.c);
+    if (cameras[kept.c]) mark(kept.c);
     camera.fov = kept.f || 45;
     camera.position.fromArray(kept.p);
     controls.target.fromArray(kept.t);
@@ -189,7 +225,9 @@ new GLTFLoader().load(stage.dataset.glb, (gltf) => {
   } else {
     fit();
   }
-  showEdges(load(localStorage, 'edges3d') !== '0');
+  // The user's setting (data-edges), or without an account this browser's.
+  const own = document.body.dataset.csrf ? null : load(localStorage, 'edges3d');
+  showEdges(own !== null ? own !== '0' : document.body.dataset.edges !== '0');
 }, (ev) => {
   if (ev.total) say(`Loading the 3D model… ${Math.round(100 * ev.loaded / ev.total)} %`);
 }, (err) => {
@@ -199,27 +237,18 @@ new GLTFLoader().load(stage.dataset.glb, (gltf) => {
 """
 
 
-def view3d(index: dict, glb_url: str) -> str:
-    """The 3D view of a model page: the stage, its controls and its script;
-    or why there is none (the model is over the size limit)."""
-    if not glb_url:
-        note = index.get("glb_note") or "There is no 3D model of this file."
-        return f'<p class="empty">{escape(note)}</p>'
-    cameras = index.get("cameras") or []
-    options = "".join(f'<option value="{i}">{escape(c.get("name", ""))}</option>'
-                      for i, c in enumerate(cameras))
-    pick = ('<select id="cam" aria-label="Camera"><option value="">Whole model</option>'
-            + (f'<optgroup label="Saved views">{options}</optgroup>' if options else "")
-            + "</select>")
+def view3d(glb_url: str, cameras: list, mb: float | None = None) -> str:
+    """The 3D view of a model page: the stage, its controls and its script,
+    for the model's GLB at ``glb_url`` (``mb`` big) and its saved views'
+    ``cameras`` (picked in the top bar's 3D dropdown)."""
     importmap = json.dumps({"imports": {
         "three": "/static/three/three.module.min.js",
         "three/addons/": "/static/three/addons/"}})
-    mb = index.get("glb_mb")
     return (f'<style>{CSS}</style>'
             f'<figure class="one stage" id="stage" data-glb="{escape(glb_url)}" '
             f'data-cameras="{escape(json.dumps(cameras))}">'
             '<div class="canvas"><div class="status"></div></div>'
-            f'<figcaption><strong>3D</strong>{pick}'
+            '<figcaption><strong>3D</strong>'
             '<button class="btn" id="fit" type="button" title="Show the whole model">Fit</button>'
             '<button class="btn" id="edges" type="button" aria-pressed="true" title="Edges on or off">Edges</button>'
             '<span class="spacer"></span>'

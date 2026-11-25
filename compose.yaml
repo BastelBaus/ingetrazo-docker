@@ -5,6 +5,9 @@
 #
 # Settings come from .env (copy .env.example). Models live in ./data
 # (or INGETRAZO_DATA_DIR); both services see the same folder.
+# Several model folders, each read-only or read/write: MODEL_FOLDERS in
+# .env and their bind mounts in compose.override.yaml (see
+# compose.folders.example.yaml and the README).
 
 x-image: &image
   image: ${INGETRAZO_IMAGE:-ghcr.io/bastelbaus/ingetrazo:latest}
@@ -34,14 +37,20 @@ services:
       OAUTH_ACCESS_TOKEN_SECONDS: ${OAUTH_ACCESS_TOKEN_SECONDS:-}
       OAUTH_REFRESH_TOKEN_DAYS: ${OAUTH_REFRESH_TOKEN_DAYS:-}
       INGETRAZO_MODEL: ${INGETRAZO_MODEL:-}
+      MODEL_FOLDERS: ${MODEL_FOLDERS:-}
+      MODEL_SCAN_DEPTH: ${MODEL_SCAN_DEPTH:-}
+      MODEL_EXCLUDE: ${MODEL_EXCLUDE:-}
       INGETRAZO_ALLOW_SAVE: ${INGETRAZO_ALLOW_SAVE:-true}
       INGETRAZO_SAVE_FORMAT: ${INGETRAZO_SAVE_FORMAT:-}
       INGETRAZO_AI_TIMEOUT: ${INGETRAZO_AI_TIMEOUT:-}
       HEALTH_MAX_BUSY_SECONDS: ${HEALTH_MAX_BUSY_SECONDS:-}
       XVFB_SCREEN: ${XVFB_SCREEN:-}
+      USERS_DB: /users/users.db
+      DEFAULT_SHARES: ${DEFAULT_SHARES:-*:r}
     volumes:
       - ${INGETRAZO_DATA_DIR:-./data}:/data
       - mcp-state:/state
+      - users:/users
 
   viewer:
     <<: *image
@@ -54,6 +63,7 @@ services:
       VIEWER_AUTH_MODE: ${VIEWER_AUTH_MODE:-local}
       VIEWER_USER: ${VIEWER_USER:-viewer}
       VIEWER_PASSWORD: ${VIEWER_PASSWORD:-}
+      VIEWER_GUEST: ${VIEWER_GUEST:-false}
       OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
@@ -68,17 +78,26 @@ services:
       PROXY_GROUPS_HEADER: ${PROXY_GROUPS_HEADER:-}
       PROXY_ADMIN_GROUP: ${PROXY_ADMIN_GROUP:-}
       PROXY_LOGOUT_URL: ${PROXY_LOGOUT_URL:-}
+      MODEL_FOLDERS: ${MODEL_FOLDERS:-}
+      MODEL_SCAN_DEPTH: ${MODEL_SCAN_DEPTH:-}
+      MODEL_EXCLUDE: ${MODEL_EXCLUDE:-}
       VIEWER_TITLE: ${VIEWER_TITLE:-IngeTrazo viewer}
+      VIEWER_PRERENDER: ${VIEWER_PRERENDER:-previews}
       VIEWER_SHEET_DPI: ${VIEWER_SHEET_DPI:-120}
+      VIEWER_NAV_MODE: ${VIEWER_NAV_MODE:-list}
       VIEWER_GLB_MAX_MB: ${VIEWER_GLB_MAX_MB:-50}
       INGETRAZO_AI_TIMEOUT: ${INGETRAZO_AI_TIMEOUT:-}
       XVFB_SCREEN: ${XVFB_SCREEN:-}
+      USERS_DB: /users/users.db
+      DEFAULT_SHARES: ${DEFAULT_SHARES:-*:r}
     volumes:
       - ${INGETRAZO_DATA_DIR:-./data}:/data:ro
       - viewer-cache:/cache
       - viewer-state:/state
+      - users:/users
 
 volumes:
   mcp-state:
   viewer-cache:
   viewer-state:
+  users:                 # the user list (users.db), shared by both services

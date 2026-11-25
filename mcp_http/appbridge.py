@@ -18,8 +18,9 @@ import threading
 import time
 from pathlib import Path
 
+from .folders import DATA_DIR, resolve  # noqa: F401  (DATA_DIR: re-exported)
+
 APP_DIR = Path(os.environ.get("INGETRAZO_APP", "/opt/ingetrazo"))
-DATA_DIR = Path(os.environ.get("INGETRAZO_DATA", "/data")).resolve()
 
 
 def log(msg: str) -> None:
@@ -175,26 +176,6 @@ class App:
         return 200, {"status": "ok"}
 
 
-def resolve_data_path(value: str, must_exist: bool = False) -> Path:
-    """A path the agent gave, relative to the data folder or absolute
-    inside it. Anything outside is refused."""
-    p = Path(value).expanduser()
-    if not p.is_absolute():
-        p = DATA_DIR / p
-    p = p.resolve()
-    if p != DATA_DIR and DATA_DIR not in p.parents:
-        raise PermissionError(f"outside the data folder {DATA_DIR}: {value}")
-    if must_exist and not p.is_file():
-        raise FileNotFoundError(f"no such file in {DATA_DIR}: {value}")
-    return p
-
-
-def list_models() -> list[Path]:
-    return sorted(p for p in DATA_DIR.rglob("*.igz") if p.is_file()
-                  and not any(part.startswith(".") for part in
-                              p.relative_to(DATA_DIR).parts))
-
-
 def env_flag(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
@@ -205,5 +186,5 @@ def env_flag(name: str, default: bool) -> bool:
 def initial_model() -> Path | None:
     name = os.environ.get("INGETRAZO_MODEL", "").strip()
     if name:
-        return resolve_data_path(name, must_exist=True)
+        return resolve(name, must_exist=True)
     return None

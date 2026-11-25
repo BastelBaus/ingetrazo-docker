@@ -1,17 +1,40 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Keeps a rendered copy of every model in the data folder.
+"""Renders the models of the model folders, on demand, and keeps what it
+rendered.
 
-A read-only headless IngeTrazo (no --allow-save) renders, per model, every
-sheet (PNG), every saved view (PNG), the sheet atlas (PDF) and the model in
-3D (GLB, with the saved views' cameras, for the browser's 3D view) into
-``/cache/<slug>/r<rev>/`` and describes it in ``/cache/<slug>/index.json``.
-A model is rendered again when its modification time or size changes and
-has stayed put for a moment (a save in progress is not read half-written).
-Each render goes to a fresh ``r<rev>`` folder, so a page never sees a mix
-of old and new images, and URLs change with every render (no stale caches).
+A read-only headless IngeTrazo (no --allow-save) does the work, one task
+at a time, from one queue with priorities:
+
+1. ``NOW``: what a user is waiting for: the model's listing, the sheet or
+   view on screen, the 3D model, the PDF they asked for;
+2. ``NEXT``: the neighbours of what is on screen (prev/next), and the items
+   viewed in the last ``VIEWER_RECENT_MINUTES`` after their model changed;
+3. ``PREVIEW``: one small preview per model for the overview;
+4. ``BACKGROUND``: everything else, with ``VIEWER_PRERENDER=all``.
+
+Per model, a **listing** (open the file, read its sheets, saved views and
+their folders, and the views' cameras: cheap) goes to
+``/cache/<slug>/index.json``. Each rendered item goes to
+``/cache/<slug>/<rev>/``, its file name carrying the render settings:
+``sheet-003-120dpi.png``, ``view-002-1600x1000.png``, ``preview-….png``,
+``sheets.pdf``, ``model.glb``. ``<rev>`` is new for every listing, so the
+URLs change when the model does and a browser may cache them for good.
+
+When a model file changes (modification time or size, and it has stayed
+put for ``VIEWER_SETTLE_SECONDS``), its renders are not redone: the next
+listing starts a new rev, and the items are rendered again when someone
+looks at them. The previous rev is kept until the one after, so a page
+shows the old picture while the new one renders.
+
+``VIEWER_PRERENDER``: ``previews`` (default) lists every model and renders
+its preview in the background; ``none`` renders only what is asked for
+(the overview's previews when it is opened); ``all`` renders everything in
+the background, as the viewer did before.
 """
 from __future__ import annotations
 
+import collections
+import copy
 import hashlib
 import json
 import os
@@ -19,10 +42,12 @@ import re
 import shutil
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mcp_http.appbridge import DATA_DIR, App, list_models, log
+from mcp_http import folders
+from mcp_http.appbridge import DATA_DIR, App, log
 
 CACHE_DIR = Path(os.environ.get("INGETRAZO_CACHE", "/cache"))
 POLL = float(os.environ.get("VIEWER_POLL_SECONDS", 3))
@@ -31,19 +56,27 @@ RETRY = float(os.environ.get("VIEWER_RETRY_SECONDS", 120))   # a failed render, 
 SHEET_DPI = int(os.environ.get("VIEWER_SHEET_DPI", 120))
 VIEW_W = int(os.environ.get("VIEWER_VIEW_WIDTH", 1600))
 VIEW_H = int(os.environ.get("VIEWER_VIEW_HEIGHT", 1000))
+PREVIEW_DPI = int(os.environ.get("VIEWER_PREVIEW_DPI", 36))
+PREVIEW_W = int(os.environ.get("VIEWER_PREVIEW_WIDTH", 480))
+PREVIEW_H = int(os.environ.get("VIEWER_PREVIEW_HEIGHT", 300))
 WITH_PDF = os.environ.get("VIEWER_PDF", "1").strip().lower() not in ("0", "false", "no", "off")
 #: The 3D model (GLB) for the browser's 3D view: one bigger than this many
 #: MB is not offered (0 = no 3D view at all).
 GLB_MAX_MB = float(os.environ.get("VIEWER_GLB_MAX_MB", 50) or 0)
+PRERENDER = os.environ.get("VIEWER_PRERENDER", "previews").strip().lower() or "previews"
+if PRERENDER not in ("all", "previews", "none"):
+    raise SystemExit(f"VIEWER_PRERENDER must be all, previews or none, not {PRERENDER!r}")
+RECENT = float(os.environ.get("VIEWER_RECENT_MINUTES", 30)) * 60
 
+#: Bumped when index.json changes shape: a model listed by an older viewer
+#: is listed again, even though its file is unchanged.
+INDEX_FORMAT = 3
 
-#: Bumped when index.json gains something a page needs: a model rendered
-#: by an older viewer is rendered again, even though its file is unchanged.
-INDEX_FORMAT = 2
+NOW, NEXT, PREVIEW, BACKGROUND = 0, 1, 2, 3
 
 
 def slug_of(model: Path) -> str:
-    rel = str(model.relative_to(DATA_DIR)).replace(os.sep, "/")
+    rel = model.relative_to(DATA_DIR).as_posix()
     base = re.sub(r"[^A-Za-z0-9._-]+", "-", rel[:-4] if rel.endswith(".igz") else rel)
     return f"{base.strip('-')[:60]}-{hashlib.sha1(rel.encode()).hexdigest()[:6]}"
 
@@ -63,6 +96,19 @@ def _path(folder) -> list[str]:
     if isinstance(folder, (list, tuple)):
         return [str(p) for p in folder if str(p).strip()]
     return [p for p in str(folder or "").split("/") if p.strip()]
+
+
+def item_file(item: str) -> str:
+    """An item's file name in a rev folder; it names the render settings,
+    so other settings never pick up an older picture."""
+    kind, _, n = item.partition(":")
+    if kind == "sheet":
+        return f"sheet-{int(n):03d}-{SHEET_DPI}dpi.png"
+    if kind == "view":
+        return f"view-{int(n):03d}-{VIEW_W}x{VIEW_H}.png"
+    if kind == "preview":
+        return f"preview-{PREVIEW_DPI}dpi-{PREVIEW_W}x{PREVIEW_H}.png"
+    return {"pdf": "sheets.pdf", "glb": "model.glb"}[kind]
 
 
 _MARK = "@@itz-viewer@@"
@@ -104,174 +150,358 @@ del _itz_viewer_cameras
 """
 
 
+@dataclass
+class Model:
+    slug: str
+    path: Path
+    folder: folders.Folder
+    name: str                    # from the data folder: what the MCP side calls it
+    rel: str                     # from its model folder
+
+
+@dataclass
+class _Task:
+    priority: int
+    seq: int
+    not_before: float
+
+
+class RenderQueue:
+    """Tasks ``(slug, item)``, each at most once, at its most urgent
+    priority. ``pop`` takes the most urgent; among equals, one of the model
+    that is open already (switching models costs an open_document), then
+    the oldest."""
+
+    def __init__(self) -> None:
+        self.cv = threading.Condition()
+        self.tasks: dict[tuple[str, str], _Task] = {}
+        self._seq = 0
+
+    def put(self, slug: str, item: str, priority: int, delay: float = 0.0) -> None:
+        with self.cv:
+            key = (slug, item)
+            t = self.tasks.get(key)
+            if t is None:
+                self._seq += 1
+                self.tasks[key] = _Task(priority, self._seq, time.monotonic() + delay)
+            elif priority < t.priority:
+                t.priority = priority
+                t.not_before = min(t.not_before, time.monotonic() + delay)
+            self.cv.notify()
+
+    def pop(self, prefer: str | None) -> tuple[str, str, int]:
+        with self.cv:
+            while True:
+                now = time.monotonic()
+                ready = [(k, t) for k, t in self.tasks.items() if t.not_before <= now]
+                if ready:
+                    top = min(t.priority for _, t in ready)
+                    best = min((kt for kt in ready if kt[1].priority == top),
+                               key=lambda kt: (kt[0][0] != prefer, kt[1].seq))
+                    del self.tasks[best[0]]
+                    return best[0][0], best[0][1], best[1].priority
+                later = [t.not_before - now for t in self.tasks.values()]
+                self.cv.wait(timeout=min(later) if later else None)
+
+    def pending(self, slug: str) -> set[str]:
+        with self.cv:
+            return {i for (s, i) in self.tasks if s == slug}
+
+    def empty(self) -> bool:
+        with self.cv:
+            return not self.tasks
+
+
 class Renderer:
     def __init__(self, app: App) -> None:
         self.app = app
+        self.queue = RenderQueue()
         self.changed = threading.Condition()
-        self.generation = 0          # bumped on every finished render
-        self.last_event: dict = {}
+        self.generation = 0          # bumped on every event
+        self.events: collections.deque = collections.deque(maxlen=256)
         self.heartbeat = time.monotonic()
-        self.rendering: str | None = None
+        self.rendering: tuple[str, str] | None = None
+        self._models: dict[str, Model] = {}
+        self._index: dict[str, dict] = {}
+        self._index_lock = threading.Lock()
+        self._recent: dict[tuple[str, str, str], float] = {}
+        self._open: tuple[str, str] | None = None     # (slug, rev) open in the app
+        self._dirty = False                            # a render changed the view
+        self._refresh_models()
 
-    # ---- state the web side reads ------------------------------------------
+    # ---- the models --------------------------------------------------------
+    def _refresh_models(self) -> bool:
+        """Re-reads the model folders; True when the set of models changed."""
+        found = {}
+        for folder, path in folders.list_models():
+            slug = slug_of(path)
+            found[slug] = Model(slug, path, folder, folders.display_name(path),
+                                path.relative_to(folder.root).as_posix())
+        changed = set(found) != set(self._models)
+        self._models = found
+        return changed
+
+    def model(self, slug: str) -> Model | None:
+        return self._models.get(slug)
+
     def models(self) -> list[dict]:
+        """For the overview: every model, folder by folder."""
+        current = self.rendering[0] if self.rendering else None
         out = []
-        for model in list_models():
-            slug = slug_of(model)
-            index = self.index(slug) or {}
-            out.append({"slug": slug,
-                        "name": str(model.relative_to(DATA_DIR)).replace(os.sep, "/"),
-                        "index": index,
-                        "rendering": self.rendering == slug})
+        for m in list(self._models.values()):
+            out.append({"slug": m.slug, "name": m.name, "rel": m.rel,
+                        "folder": m.folder.name, "mode": m.folder.mode,
+                        "index": self.index(m.slug) or {},
+                        "fresh": self.fresh(m.slug),
+                        "rendering": current == m.slug})
         return out
 
+    # ---- the listings --------------------------------------------------------
     def index(self, slug: str) -> dict | None:
+        """The model's latest listing (never to be changed by the caller)."""
+        with self._index_lock:
+            idx = self._index.get(slug)
+        if idx is not None:
+            return idx
         try:
-            return json.loads((CACHE_DIR / slug / "index.json").read_text("utf-8"))
+            idx = json.loads((CACHE_DIR / slug / "index.json").read_text("utf-8"))
         except (OSError, ValueError):
             return None
+        if not isinstance(idx, dict) or idx.get("format") != INDEX_FORMAT:
+            return None
+        with self._index_lock:
+            self._index.setdefault(slug, idx)
+        return idx
 
-    def _notify(self, event: dict) -> None:
+    def _save(self, idx: dict) -> None:
+        base = CACHE_DIR / idx["slug"]
+        base.mkdir(parents=True, exist_ok=True)
+        tmp = base / "index.json.part"
+        tmp.write_text(json.dumps(idx, indent=1, ensure_ascii=False), "utf-8")
+        tmp.replace(base / "index.json")
+        with self._index_lock:
+            self._index[idx["slug"]] = copy.deepcopy(idx)
+
+    def fresh(self, slug: str) -> bool:
+        """The listing describes the file as it is now (a failed listing
+        counts as fresh until ``VIEWER_RETRY_SECONDS`` have passed)."""
+        m, idx = self._models.get(slug), self.index(slug)
+        if m is None or idx is None:
+            return False
+        try:
+            sig = _signature(m.path)
+        except OSError:
+            return True                     # gone: nothing to list
+        if idx.get("source_signature") != sig:
+            return False
+        return not (idx.get("errors") and time.time() - idx.get("listed_ts", 0) > RETRY)
+
+    def state(self, idx: dict, item: str) -> dict:
+        """An item's render: ``file`` (rendered), ``error``, ``note``,
+        ``warnings``; empty when it was not rendered yet."""
+        return (idx.get("items") or {}).get(item) or {}
+
+    def due(self, idx: dict, item: str) -> bool:
+        """Not rendered, and not failed a moment ago."""
+        st = self.state(idx, item)
+        if st.get("file") or st.get("note"):
+            return False
+        return not st.get("error") or time.time() - st.get("at", 0) > RETRY
+
+    # ---- what the pages ask for ----------------------------------------------
+    def request(self, slug: str, item: str, priority: int = NOW) -> None:
+        if slug in self._models:
+            self.queue.put(slug, item, priority)
+
+    def viewed(self, slug: str, item: str, name: str) -> None:
+        """A sheet or view was looked at: rendered again first after its
+        model changes (by name: its place may change)."""
+        now = time.time()
+        self._recent[(slug, item.partition(":")[0], name)] = now
+        for k, t in list(self._recent.items()):
+            if now - t > RECENT:
+                self._recent.pop(k, None)
+
+    def _notify(self, kind: str, **event) -> None:
         with self.changed:
             self.generation += 1
-            self.last_event = {**event, "generation": self.generation}
+            self.events.append({**event, "kind": kind, "generation": self.generation})
             self.changed.notify_all()
 
-    # ---- the loop ------------------------------------------------------------
+    def events_since(self, generation: int) -> list[dict]:
+        with self.changed:
+            return [e for e in self.events if e["generation"] > generation]
+
+    # ---- the loops -----------------------------------------------------------
     def run(self) -> None:
+        """Starts the render worker, then watches the model folders."""
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        threading.Thread(target=self._work, name="render", daemon=True).start()
         while True:
             self.heartbeat = time.monotonic()
             try:
-                self._pass()
+                self._scan()
             except Exception as exc:                 # keep watching
-                log(f"viewer: render pass failed: {exc!r}")
+                log(f"viewer: scan failed: {exc!r}")
             time.sleep(POLL)
 
-    def _pass(self) -> None:
-        models = list_models()
-        live = set()
-        for model in models:
-            slug = slug_of(model)
-            live.add(slug)
-            try:
-                sig = _signature(model)
-            except OSError:
+    def _scan(self) -> None:
+        if self._refresh_models():
+            self._notify("models")
+        for m in list(self._models.values()):
+            idx = self.index(m.slug)
+            if PRERENDER == "none":
                 continue
-            index = self.index(slug)
-            if index and index.get("source_signature") == sig \
-                    and index.get("format") == INDEX_FORMAT and not (
-                    index.get("errors") and time.time() - index.get("rendered_ts", 0) > RETRY):
-                continue                             # up to date (failures retried)
-            if time.time() - sig[0] / 1e9 < SETTLE:
-                continue                             # still being written
-            self._render(model, slug, sig)
-            self.heartbeat = time.monotonic()
+            if not self.fresh(m.slug) or idx is None:
+                self.queue.put(m.slug, "all" if PRERENDER == "all" else "preview",
+                               BACKGROUND if PRERENDER == "all" else PREVIEW)
+            elif PRERENDER == "all":
+                if any(self.due(idx, i) for i in self._items(idx)):
+                    self.queue.put(m.slug, "all", BACKGROUND)
+            elif self.due(idx, "preview"):
+                self.queue.put(m.slug, "preview", PREVIEW)
         # Models that are gone: their renders go too.
         for d in CACHE_DIR.iterdir() if CACHE_DIR.is_dir() else ():
-            if d.is_dir() and d.name not in live:
+            if d.is_dir() and d.name not in self._models:
                 shutil.rmtree(d, ignore_errors=True)
-                self._notify({"slug": d.name, "removed": True})
+                with self._index_lock:
+                    self._index.pop(d.name, None)
+                self._notify("removed", slug=d.name)
 
+    def _work(self) -> None:
+        while True:
+            slug, item, priority = self.queue.pop(self._open[0] if self._open else None)
+            self.rendering = (slug, item)
+            self._notify("rendering", slug=slug, item=item)
+            try:
+                self._task(slug, item, priority)
+            except Exception as exc:                 # keep working
+                log(f"viewer: {slug} {item}: {exc!r}")
+            finally:
+                self.rendering = None
+            if self.queue.empty():
+                self._notify("idle")
+
+    def _items(self, idx: dict) -> list[str]:
+        """Every item of a model, in the order ``all`` renders them: the 3D
+        model first, while the document is as it was saved."""
+        n_sheets, n_views = len(idx.get("sheets") or []), len(idx.get("views") or [])
+        items = ["glb"] if GLB_MAX_MB > 0 else []
+        items += ["preview"] + [f"sheet:{i}" for i in range(1, n_sheets + 1)]
+        items += [f"view:{i}" for i in range(1, n_views + 1)]
+        if WITH_PDF and n_sheets:
+            items.append("pdf")
+        return items
+
+    def _task(self, slug: str, item: str, priority: int) -> None:
+        m = self._models.get(slug)
+        if m is None:
+            return
+        try:
+            sig = _signature(m.path)
+        except OSError:
+            return
+        if not self.fresh(slug):
+            if time.time() - sig[0] / 1e9 < SETTLE:   # still being written
+                self.queue.put(slug, item, priority, delay=SETTLE)
+                return
+            self._list(m, sig)
+        if item == "list":
+            return
+        idx = copy.deepcopy(self.index(slug))
+        if idx is None:
+            return
+        if item == "all":
+            for i in self._items(idx):
+                if self.due(idx, i):
+                    self.queue.put(slug, i, BACKGROUND)
+            return
+        if item not in self._items(idx) or not self.due(idx, item):
+            return
+        if idx.get("errors"):                        # the file did not open
+            idx.setdefault("items", {})[item] = {"error": "; ".join(idx["errors"]),
+                                                 "at": time.time()}
+            self._save(idx)
+            self._notify("done", slug=slug, rev=idx["rev"], item=item, ok=False)
+            return
+        self._render(m, idx, item)
+
+    # ---- listing ---------------------------------------------------------------
     def _call(self, tool: str, args: dict | None = None) -> dict:
         reply = self.app.call(tool, args or {})
         if not reply.get("ok"):
             raise RuntimeError(f"{tool}: {reply.get('error')}")
         return reply.get("result") or {}
 
-    def _render(self, model: Path, slug: str, sig: list) -> None:
-        name = str(model.relative_to(DATA_DIR)).replace(os.sep, "/")
-        log(f"viewer: rendering {name}")
-        self.rendering = slug
-        self._notify({"slug": slug, "rendering": True})
-        t0 = time.monotonic()
-        base = CACHE_DIR / slug
-        rev = f"r{time.time_ns() // 1_000_000}"
-        out = base / rev
-        out.mkdir(parents=True, exist_ok=True)
-        index = {"format": INDEX_FORMAT, "name": name, "slug": slug, "rev": rev,
-                 "source_signature": sig, "rendered_at": _now(),
-                 "rendered_ts": time.time(),
-                 "sheets": [], "views": [], "pdf": None, "errors": [],
-                 "glb": None, "glb_note": None, "cameras": []}
-        try:
-            # The viewer never saves: whatever a render left changed goes.
-            info = self._call("open_document", {"path": str(model),
-                                                "discard_changes": True})
-            # The 3D model first, while the document is as it was saved
-            # (rendering a saved view switches layers on and off).
-            if GLB_MAX_MB > 0:
-                self._render_glb(out, index)
-            sheets = self._sheet_list(info)
-            if sheets:
-                try:
-                    index["sheets"], index["errors"] = self._render_sheets(out, sheets)
-                except RuntimeError as exc:          # e.g. the bridge timed out
-                    index["errors"].append(f"sheets: {exc}")
-                    log(f"viewer: {name}: sheets: {exc}")
-                if WITH_PDF and index["sheets"]:
-                    try:
-                        self._call("export_pdf", {
-                            "path": str(out / "sheets.pdf"), "format": "pdf",
-                            "sheets": list(range(1, len(sheets) + 1))})
-                        index["pdf"] = "sheets.pdf"
-                    except RuntimeError as exc:
-                        index["errors"].append(f"PDF: {exc}")
-            views = list(info.get("views") or [])
-            folders = self._view_folders() if views else {}
-            for i, view in enumerate(views):
-                file = f"view-{i:02d}.png"
-                try:
-                    self._call("export_view", {"view": view, "path": str(out / file),
-                                               "width": VIEW_W, "height": VIEW_H})
-                    index["views"].append({"name": view, "file": file,
-                                           "folder": folders.get(view, [])})
-                except RuntimeError as exc:
-                    index["errors"].append(f"view {view}: {exc}")
-        except Exception as exc:
-            index["errors"].append(str(exc))
-            log(f"viewer: {name}: {exc}")
-        finally:
-            self.rendering = None
-        index["render_seconds"] = round(time.monotonic() - t0, 1)
-        tmp = base / "index.json.part"
-        tmp.write_text(json.dumps(index, indent=1, ensure_ascii=False), "utf-8")
-        tmp.replace(base / "index.json")
-        for old in base.iterdir():                   # keep only this render
-            if old.is_dir() and old.name != rev:
-                shutil.rmtree(old, ignore_errors=True)
-        log(f"viewer: {name}: {len(index['sheets'])} sheets, "
-            f"{len(index['views'])} views"
-            + (f", 3D {index['glb_mb']} MB" if index.get("glb") else "")
-            + f" in {index['render_seconds']}s"
-            + (f", {len(index['errors'])} problems" if index["errors"] else ""))
-        self._notify({"slug": slug, "rev": rev})
+    def _open_model(self, m: Model, rev: str, clean: bool = False) -> None:
+        """The model open in the app; ``clean``: as saved, nothing a render
+        changed (rendering a saved view switches layers on and off)."""
+        if self._open == (m.slug, rev) and not (clean and self._dirty):
+            return
+        self._open = None
+        # The viewer never saves: whatever a render left changed goes.
+        self._call("open_document", {"path": str(m.path), "discard_changes": True})
+        self._open, self._dirty = (m.slug, rev), False
 
-    def _render_glb(self, out: Path, index: dict) -> None:
-        """``model.glb`` for the 3D view, and the saved views' cameras. A
-        file over ``VIEWER_GLB_MAX_MB`` is deleted and noted, not counted as
-        an error: an error renders the model again every few minutes, and
-        that would not make it any smaller."""
-        glb = out / "model.glb"
+    def _list(self, m: Model, sig: list) -> None:
+        log(f"viewer: listing {m.name}")
+        t0 = time.monotonic()
+        old = self.index(m.slug)
+        rev = f"r{time.time_ns() // 1_000_000}"
+        idx = {"format": INDEX_FORMAT, "name": m.name, "folder": m.folder.name,
+               "slug": m.slug, "rev": rev, "source_signature": sig,
+               "listed_at": _now(), "listed_ts": time.time(),
+               "sheets": [], "views": [], "cameras": [], "items": {}, "errors": []}
         try:
-            self._call("export_file", {"path": str(glb)})
-        except RuntimeError as exc:
-            index["errors"].append(f"3D model: {exc}")
-            glb.unlink(missing_ok=True)
-            return
-        size = glb.stat().st_size if glb.is_file() else 0
-        if not size:
-            index["errors"].append("3D model: nothing was written")
-            return
-        mb = size / 1_000_000
-        if mb > GLB_MAX_MB:
-            glb.unlink(missing_ok=True)
-            index["glb_note"] = (f"The 3D model is {mb:.1f} MB, more than the "
-                                 f"{GLB_MAX_MB:g} MB limit (VIEWER_GLB_MAX_MB).")
-            log(f"viewer: {index['name']}: 3D model left out ({mb:.1f} MB)")
-            return
-        index["glb"], index["glb_mb"] = glb.name, round(mb, 2)
-        index["cameras"] = self._view_cameras()
+            self._open = None
+            info = self._call("open_document", {"path": str(m.path),
+                                                "discard_changes": True})
+            self._open, self._dirty = (m.slug, rev), False
+            idx["sheets"] = self._sheet_list(info)
+            views = [str(v) for v in info.get("views") or []]
+            paths = self._view_folders() if views else {}
+            idx["views"] = [{"name": v, "folder": paths.get(v, [])} for v in views]
+            if GLB_MAX_MB > 0 and views:
+                idx["cameras"] = self._view_cameras()
+        except Exception as exc:
+            idx["errors"].append(str(exc))
+            log(f"viewer: {m.name}: {exc}")
+        idx["list_seconds"] = round(time.monotonic() - t0, 1)
+        # The last rev's pictures stay until the next listing: a page shows
+        # them while the new ones render.
+        idx["prev"] = self._prev_files(old) if old else None
+        (CACHE_DIR / m.slug / rev).mkdir(parents=True, exist_ok=True)
+        self._save(idx)
+        keep = {rev} | ({idx["prev"]["rev"]} if idx["prev"] else set())
+        for d in (CACHE_DIR / m.slug).iterdir():
+            if d.is_dir() and d.name not in keep:
+                shutil.rmtree(d, ignore_errors=True)
+        log(f"viewer: {m.name}: {len(idx['sheets'])} sheets, {len(idx['views'])} views"
+            f" in {idx['list_seconds']}s" + (" (failed)" if idx["errors"] else ""))
+        self._notify("listed", slug=m.slug, rev=rev)
+        # What was looked at lately, by name, comes first.
+        now = time.time()
+        for (slug, kind, name), t in list(self._recent.items()):
+            if slug != m.slug or now - t > RECENT:
+                continue
+            for i, e in enumerate(idx["sheets"] if kind == "sheet" else idx["views"]):
+                if e["name"] == name:
+                    self.queue.put(m.slug, f"{kind}:{i + 1}", NEXT)
+                    break
+
+    @staticmethod
+    def _prev_files(old: dict) -> dict | None:
+        """The rendered pictures of a listing, by kind and name."""
+        files, items = {}, old.get("items") or {}
+        for kind in ("sheet", "view"):
+            for i, e in enumerate(old.get(kind + "s") or []):
+                f = (items.get(f"{kind}:{i + 1}") or {}).get("file")
+                if f:
+                    files.setdefault(f"{kind}:{e['name']}", f)
+        f = (items.get("preview") or {}).get("file")
+        if f:
+            files["preview"] = f
+        return {"rev": old["rev"], "files": files} if files else None
 
     def _view_cameras(self) -> list[dict]:
         """The saved views' cameras (read-only); none if they cannot be read."""
@@ -324,24 +554,87 @@ class Renderer:
         except (RuntimeError, KeyError, TypeError):
             return {}
 
-    def _render_sheets(self, out: Path, sheets: list[dict]) -> tuple[list, list]:
-        errors: list[str] = []
-        # Places are 1-based; per sheet, the views that did not render.
-        result = self._call("export_pdf", {
-            "path": str(out / "sheet.png"), "format": "png",
-            "dpi": SHEET_DPI, "sheets": list(range(1, len(sheets) + 1))})
+    # ---- rendering ---------------------------------------------------------------
+    def _render(self, m: Model, idx: dict, item: str) -> None:
+        out = CACHE_DIR / m.slug / idx["rev"]
+        out.mkdir(parents=True, exist_ok=True)
+        target = out / item_file(item)
+        state: dict = {"at": time.time()}
+        t0 = time.monotonic()
+        try:
+            self._open_model(m, idx["rev"], clean=item == "glb")
+            kind, _, n = item.partition(":")
+            if kind == "glb":
+                state.update(self._render_glb(target))
+            elif kind == "pdf":
+                self._dirty = True
+                self._call("export_pdf", {"path": str(target), "format": "pdf",
+                                          "sheets": list(range(1, len(idx["sheets"]) + 1))})
+            elif kind == "sheet":
+                state["warnings"] = self._render_sheet(out, int(n), SHEET_DPI, target)
+            elif kind == "view":
+                self._render_view(idx["views"][int(n) - 1]["name"], VIEW_W, VIEW_H, target)
+            elif kind == "preview":
+                if idx["sheets"]:
+                    self._render_sheet(out, 1, PREVIEW_DPI, target)
+                elif idx["views"]:
+                    self._render_view(idx["views"][0]["name"], PREVIEW_W, PREVIEW_H, target)
+                else:                       # no sheet, no saved view: the model
+                    self._dirty = True
+                    self._call("screenshot", {"path": str(target), "width": PREVIEW_W,
+                                              "height": PREVIEW_H, "view": "iso", "fit": True})
+            if not state.get("note"):
+                if not target.is_file() or not target.stat().st_size:
+                    raise RuntimeError("nothing was written")
+                state["file"] = target.name
+        except Exception as exc:
+            state["error"] = str(exc)
+            target.unlink(missing_ok=True)
+        state["seconds"] = round(time.monotonic() - t0, 1)
+        if not state.get("warnings"):
+            state.pop("warnings", None)
+        idx.setdefault("items", {})[item] = state
+        self._save(idx)
+        log(f"viewer: {m.name}: {item} in {state['seconds']}s"
+            + (f": {state['error']}" if state.get("error") else ""))
+        self._notify("done", slug=m.slug, rev=idx["rev"], item=item,
+                     ok=not state.get("error"))
+
+    def _render_sheet(self, out: Path, n: int, dpi: int, target: Path) -> list[str]:
+        """Sheet ``n`` (1-based) as a PNG; the views on it that did not render."""
+        self._dirty = True
+        stem = out / f".tmp-{target.stem}.png"
+        result = self._call("export_pdf", {"path": str(stem), "format": "png",
+                                           "dpi": dpi, "sheets": [n]})
         files = [Path(f) for f in result.get("files") or []]
+        if not files or not files[0].is_file():
+            raise RuntimeError("not rendered")
+        files[0].replace(target)
+        for f in files[1:]:
+            f.unlink(missing_ok=True)
+        warnings = []
         for sheet, msgs in (result.get("views_not_rendered") or {}).items():
-            for m in msgs if isinstance(msgs, list) else [msgs]:
-                errors.append(f"sheet {sheet}: {m}")
-        rows = []
-        for i, sheet in enumerate(sheets):
-            row = dict(sheet)
-            if i < len(files) and files[i].is_file():
-                target = out / f"sheet-{i:02d}.png"
-                files[i].replace(target)
-                row["file"] = target.name
-            else:
-                errors.append(f"sheet {sheet['name']}: not rendered")
-            rows.append(row)
-        return rows, errors
+            for msg in msgs if isinstance(msgs, list) else [msgs]:
+                warnings.append(f"{sheet}: {msg}")
+        return warnings
+
+    def _render_view(self, name: str, width: int, height: int, target: Path) -> None:
+        self._dirty = True
+        self._call("export_view", {"view": name, "path": str(target),
+                                   "width": width, "height": height})
+
+    def _render_glb(self, glb: Path) -> dict:
+        """``model.glb`` for the 3D view. A file over ``VIEWER_GLB_MAX_MB``
+        is deleted and noted, not counted as an error: it would not get any
+        smaller by trying again."""
+        self._call("export_file", {"path": str(glb)})
+        size = glb.stat().st_size if glb.is_file() else 0
+        if not size:
+            raise RuntimeError("nothing was written")
+        mb = size / 1_000_000
+        if mb > GLB_MAX_MB:
+            glb.unlink(missing_ok=True)
+            log(f"viewer: {glb.parent.parent.name}: 3D model left out ({mb:.1f} MB)")
+            return {"note": f"The 3D model is {mb:.1f} MB, more than the "
+                            f"{GLB_MAX_MB:g} MB limit (VIEWER_GLB_MAX_MB)."}
+        return {"mb": round(mb, 2)}

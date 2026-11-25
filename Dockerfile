@@ -75,8 +75,8 @@ COPY viewer/ /opt/ingetrazo-docker/viewer/
 RUN chmod -R a+rX /opt/ingetrazo-docker
 
 RUN useradd --create-home --uid 1000 ingetrazo \
- && mkdir -p /data /cache /state \
- && chown ingetrazo:ingetrazo /data /cache /state
+ && mkdir -p /data /cache /state /users \
+ && chown ingetrazo:ingetrazo /data /cache /state /users
 
 ENV QT_QPA_PLATFORM=xcb \
     LIBGL_ALWAYS_SOFTWARE=1 \
@@ -91,7 +91,7 @@ RUN python /opt/ingetrazo/main.py --check
 
 USER ingetrazo
 WORKDIR /home/ingetrazo
-VOLUME ["/data", "/cache", "/state"]
+VOLUME ["/data", "/cache", "/state", "/users"]
 EXPOSE 8765 8080
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
