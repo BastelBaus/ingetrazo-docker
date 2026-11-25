@@ -6,8 +6,10 @@ mount, so the viewer and the MCP server share one list.
 A user has a name, a role (``admin`` or ``user``), where they come from
 (``local``: a password kept here; ``oidc`` / ``proxy``: logged in
 elsewhere, recorded on first login), whether they are active, the
-settings they work with (``SETTINGS``, kept as they change them) and the
-folders they may see and write (``shares``, see shares.py). Admins
+settings they work with (``SETTINGS``, kept as they change them), the
+folders they may see and write (``shares``, see shares.py), and what they
+may use: the web viewer (``web``) and the MCP server (``mcp``, with
+personal access tokens). Admins
 manage the list in the viewer's admin panel (``/admin``).
 
 Passwords are stored as scrypt hashes. The schema carries its version in
@@ -38,7 +40,7 @@ NAME = re.compile(r"^[\w.@+-]{1,64}$", re.UNICODE)
 MIN_PASSWORD = 8
 
 #: Each entry upgrades the schema by one version.
-MIGRATIONS: list[str] = [
+MIGRATIONS: list[str | list[str]] = [
     """CREATE TABLE users (
          name TEXT PRIMARY KEY COLLATE NOCASE,
          role TEXT NOT NULL DEFAULT 'user',
@@ -54,7 +56,21 @@ MIGRATIONS: list[str] = [
     # 3: the folders a user may see and write (mcp_http/shares.py), as JSON;
     # NULL: DEFAULT_SHARES.
     "ALTER TABLE users ADD COLUMN shares TEXT",
+    # 4: what a user may use: the web viewer, the MCP server. Admins had MCP.
+    ["ALTER TABLE users ADD COLUMN web INTEGER NOT NULL DEFAULT 1",
+     "ALTER TABLE users ADD COLUMN mcp INTEGER NOT NULL DEFAULT 0",
+     "UPDATE users SET mcp = 1 WHERE role = 'admin'"],
+    # 5: personal MCP access tokens (hashed).
+    """CREATE TABLE tokens (
+         hash TEXT PRIMARY KEY,
+         user TEXT NOT NULL COLLATE NOCASE,
+         label TEXT NOT NULL DEFAULT '',
+         created TEXT NOT NULL,
+         last_used TEXT
+       )""",
 ]
+#: A personal MCP token starts with this, so it is recognisable in a config.
+TOKEN_PREFIX = "itz_"
 
 #: The settings a user keeps (the viewer's and later the MCP server's):
 #: name → (allowed values, default). The default ``None`` means "as the
@@ -103,6 +119,8 @@ class Account:
     last_login: str | None = None
     config: dict = field(default_factory=dict)
     shares: list | None = None           # None: DEFAULT_SHARES
+    web: bool = True                     # may use the web viewer
+    mcp: bool = False                    # may use the MCP server
 
     @property
     def admin(self) -> bool:
@@ -136,7 +154,8 @@ class Users:
                     if self._db.execute("PRAGMA user_version").fetchone()[0] >= n:
                         self._db.execute("ROLLBACK")
                         continue
-                    self._db.execute(sql)
+                    for stmt in ([sql] if isinstance(sql, str) else sql):
+                        self._db.execute(stmt)
                     self._db.execute(f"PRAGMA user_version={n}")
                     self._db.execute("COMMIT")
                 except sqlite3.Error:
@@ -161,7 +180,8 @@ class Users:
         return Account(row["name"], row["role"], row["source"], bool(row["active"]),
                        bool(row["password"]), groups, row["created"], row["last_login"],
                        config if isinstance(config, dict) else {},
-                       shares if isinstance(shares, list) or shares is None else [])
+                       shares if isinstance(shares, list) or shares is None else [],
+                       bool(row["web"]), bool(row["mcp"]))
 
     def get(self, name: str) -> Account | None:
         with self._lock:
@@ -269,6 +289,7 @@ class Users:
         self._keeps_an_admin(acc)
         with self._lock:
             self._db.execute("DELETE FROM users WHERE name = ?", (acc.name,))
+            self._db.execute("DELETE FROM tokens WHERE user = ?", (acc.name,))
 
     def seen(self, name: str, source: str, groups: list[str],
              admin_by_group: bool | None) -> Account:
@@ -356,6 +377,66 @@ class Users:
                              (None if value is None else json.dumps(value), acc.name))
         return value
 
+    # ---- rights ------------------------------------------------------------------
+    def set_rights(self, name: str, web: bool | None = None, mcp: bool | None = None) -> None:
+        """What a user may use: the web viewer, the MCP server. An admin
+        keeps the web viewer (where the users are managed)."""
+        acc = self._require(name)
+        if web is False and acc.admin:
+            raise UserError("an admin keeps the web viewer; make them a user first")
+        if mcp and acc.source == "guest":
+            raise UserError("the guest cannot use the MCP server")
+        with self._lock:
+            if web is not None:
+                self._db.execute("UPDATE users SET web = ? WHERE name = ?", (int(web), acc.name))
+            if mcp is not None:
+                self._db.execute("UPDATE users SET mcp = ? WHERE name = ?", (int(mcp), acc.name))
+
+    # ---- personal MCP tokens ---------------------------------------------------------
+    @staticmethod
+    def _token_hash(token: str) -> str:
+        return hashlib.sha256(token.encode()).hexdigest()
+
+    def create_token(self, name: str, label: str = "") -> str:
+        """A new MCP access token for ``name``; shown once, kept hashed."""
+        acc = self._require(name)
+        if not acc.mcp:
+            raise UserError(f"{acc.name} may not use the MCP server")
+        token = TOKEN_PREFIX + secrets.token_urlsafe(32)
+        with self._lock:
+            self._db.execute("INSERT INTO tokens (hash, user, label, created) VALUES (?, ?, ?, ?)",
+                             (self._token_hash(token), acc.name, label.strip()[:64], _now()))
+        return token
+
+    def tokens(self, name: str) -> list[dict]:
+        """A user's tokens: id (the start of the hash), label, dates."""
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM tokens WHERE user = ? ORDER BY created",
+                                    (name,)).fetchall()
+        return [{"id": r["hash"][:12], "label": r["label"], "created": r["created"],
+                 "last_used": r["last_used"]} for r in rows]
+
+    def revoke_token(self, name: str, token_id: str) -> bool:
+        if not re.fullmatch(r"[0-9a-f]{12}", token_id or ""):
+            return False
+        with self._lock:
+            cur = self._db.execute("DELETE FROM tokens WHERE user = ? AND hash LIKE ?",
+                                   (name, token_id + "%"))
+        return cur.rowcount > 0
+
+    def by_token(self, token: str) -> Account | None:
+        """The user a personal MCP token belongs to, if they may use MCP."""
+        if not token.startswith(TOKEN_PREFIX):
+            return None
+        key = self._token_hash(token)
+        with self._lock:
+            row = self._db.execute("SELECT user FROM tokens WHERE hash = ?", (key,)).fetchone()
+            if row is None:
+                return None
+            self._db.execute("UPDATE tokens SET last_used = ? WHERE hash = ?", (_now(), key))
+        acc = self.get(row["user"])
+        return acc if acc and acc.active and acc.mcp else None
+
     def ensure_admin(self, name: str, password: str) -> bool:
         """The first admin, from the environment: created when there is no
         active admin yet. True when it was."""
@@ -364,11 +445,12 @@ class Users:
         acc = self.get(name)
         if acc is None:
             self.create(name, password, "admin")
+            self.set_rights(name, mcp=True)
         else:
             with self._lock:
                 self._db.execute(
-                    "UPDATE users SET role = 'admin', active = 1, source = 'local', "
-                    "password = ? WHERE name = ?", (hash_password(password), acc.name))
+                    "UPDATE users SET role = 'admin', active = 1, source = 'local', web = 1, "
+                    "mcp = 1, password = ? WHERE name = ?", (hash_password(password), acc.name))
         return True
 
     def import_json(self, path: Path) -> int:

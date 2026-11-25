@@ -35,6 +35,12 @@ CSS = """
 .panel .note{background:color-mix(in srgb,var(--ok) 12%,var(--card));border:1px solid var(--ok);border-radius:8px;padding:8px 12px;margin:12px 0;font-size:14px}
 .panel .err{background:color-mix(in srgb,#c0392b 10%,var(--card));border:1px solid #c0392b;border-radius:8px;padding:8px 12px;margin:12px 0;font-size:14px;color:inherit}
 .panel .off td:not(.acts){color:var(--muted)}
+.panel .rights{display:inline-flex;gap:0}
+.panel .right{border:1px solid var(--line);background:var(--card);color:var(--muted);padding:5px 9px;font-size:12px;border-radius:0;text-decoration:line-through}
+.panel .rights>:first-child .right,.panel .rights>.right:first-child{border-radius:6px 0 0 6px}
+.panel .rights>:last-child .right,.panel .rights>.right:last-child{border-radius:0 6px 6px 0;margin-left:-1px}
+.panel .right.on{color:var(--fg);background:color-mix(in srgb,var(--ok) 14%,var(--card));text-decoration:none;font-weight:600}
+.panel .token{font-family:ui-monospace,monospace;font-size:13px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px;overflow-wrap:anywhere;user-select:all}
 .panel .stack{display:flex;flex-direction:column;gap:10px;max-width:360px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
 .panel .stack label{font-size:13px;color:var(--muted)}
 @media (max-width:820px){.panel table,.panel tbody,.panel tr,.panel td{display:block;width:100%}
@@ -51,6 +57,9 @@ def _wrap(title: str, body: str, user, site: str) -> bytes:
 
 
 def _messages(note: str, error: str) -> str:
+    if note.startswith("TOKEN:"):              # a new token: shown once, easy to copy
+        return ('<div class="note">Your new token – copy it now, it is shown only once:'
+                f'<div class="token">{escape(note[6:])}</div></div>')
     return ((f'<div class="note">{escape(note)}</div>' if note else "")
             + (f'<div class="err">{escape(error)}</div>' if error else ""))
 
@@ -86,6 +95,19 @@ def page(auth, user, note: str = "", error: str = "", title: str = "") -> bytes:
                               '<input name="password" type="password" placeholder="New password" '
                               'autocomplete="new-password" aria-label="New password" required>'
                               '<button>Set password</button>'))
+        rights = []
+        for key, label, on, locked in (
+                ("web", "Web", acc.web, acc.admin),
+                ("mcp", "MCP", acc.mcp, acc.source == "guest")):
+            if locked:
+                rights.append(f'<span class="right{" on" if on else ""}" title="fixed">{label}</span>')
+            else:
+                rights.append(_form(auth, user, "rights", acc.name,
+                                    f'<input type="hidden" name="{key}" value="{0 if on else 1}">'
+                                    f'<button class="right{" on" if on else ""}" aria-pressed="{str(on).lower()}" '
+                                    f'title="{label}: {"on – click to turn off" if on else "off – click to turn on"}">'
+                                    f'{label}</button>'))
+        acts.append('<span class="rights">' + "".join(rights) + "</span>")
         if not acc.admin:
             n = ("default" if acc.shares is None else
                  f"{sum(1 for x in acc.shares if x['access'] != 'none')} shared")
@@ -159,6 +181,12 @@ def act(auth, user, form: dict) -> tuple[str, str]:
             on = get("on") == "1"
             users.set_active(name, on)
             return f"{name} is switched {'on' if on else 'off'}.", ""
+        if action == "rights":
+            web, mcp = get("web"), get("mcp")
+            users.set_rights(name, web=(web == "1") if web else None,
+                             mcp=(mcp == "1") if mcp else None)
+            what = "web viewer" if web else "MCP server"
+            return f"{name} {'may' if (web or mcp) == '1' else 'may no longer'} use the {what}.", ""
         if action == "shares":
             acc = users.get(name)
             if acc is None:
@@ -302,7 +330,36 @@ def account_page(auth, user, note: str = "", error: str = "", title: str = "") -
               'autocomplete="new-password" required>'
               '<button class="primary">Change password</button></form>')
     settings = _settings_form(auth, user) if acc else ""
-    return _wrap("Account", _messages(note, error) + info + settings + pw, user, title)
+    return _wrap("Account", _messages(note, error) + info + settings + pw
+                 + _tokens(auth, user, acc), user, title)
+
+
+def _tokens(auth, user, acc) -> str:
+    """Personal MCP access tokens, for users who may use the MCP server."""
+    if acc is None or not acc.mcp:
+        return ""
+    csrf = auth.sessions.csrf(user.name)
+    rows = "".join(
+        f'<tr><td>{escape(t["label"] or "–")}</td>'
+        f'<td class="muted">{escape(t["created"][:10])}</td>'
+        f'<td class="muted">{escape((t["last_used"] or "never")[:16].replace("T", " "))}</td>'
+        '<td class="acts"><div><form class="inline" method="post" action="/account">'
+        f'<input type="hidden" name="csrf" value="{csrf}">'
+        '<input type="hidden" name="action" value="revoke">'
+        f'<input type="hidden" name="id" value="{t["id"]}">'
+        '<button class="danger">Revoke</button></form></div></td></tr>'
+        for t in auth.users.tokens(acc.name))
+    table = ('<table><thead><tr><th>Name</th><th>Made</th><th>Last used</th><th></th></tr></thead>'
+             f'<tbody>{rows}</tbody></table>' if rows else "")
+    return ('<h2>MCP access</h2><p class="muted">A personal token for an MCP client '
+            '(<code>Authorization: Bearer &lt;token&gt;</code> with MCP_AUTH=token). The client '
+            'sees the folders you see here; with read &amp; write it may save and export.</p>'
+            + table
+            + '<form class="add" method="post" action="/account" style="margin-top:12px">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            '<input type="hidden" name="action" value="token">'
+            '<input name="label" placeholder="Name, e.g. Claude Desktop" aria-label="Token name">'
+            '<button class="primary">New token</button></form>')
 
 
 def act_account(auth, user, form: dict) -> tuple[str, str]:
@@ -314,6 +371,13 @@ def act_account(auth, user, form: dict) -> tuple[str, str]:
             auth.users.set_settings(user.name, {k: setting_value(k, get(k)) for k in LABELS
                                                 if k in form})
             return "Your settings are saved.", ""
+        if get("action") == "token":
+            token = auth.users.create_token(user.name, get("label"))
+            return "TOKEN:" + token, ""
+        if get("action") == "revoke":
+            if not auth.users.revoke_token(user.name, get("id")):
+                raise UserError("no such token")
+            return "The token is revoked.", ""
         if get("action") == "password":
             if auth.users.authenticate(user.name, get("old")) is None:
                 raise UserError("the current password is wrong")

@@ -9,8 +9,9 @@ Inspector or Claude Code on this machine:
 - dynamic client registration (RFC 7591) at ``/register``, for redirect
   URIs on the allow list ``OAUTH_REDIRECT_URIS``;
 - ``/authorize``: the authorisation code flow with PKCE (S256 only), a
-  login and consent page for the one user ``OAUTH_USER`` /
-  ``OAUTH_PASSWORD``;
+  login and consent page: a user of the user list who may use MCP
+  (users.py), or ``OAUTH_USER`` / ``OAUTH_PASSWORD`` (every right, as
+  before there was a user list);
 - ``/token``: codes and refresh tokens (rotated on every use) for access
   tokens that expire.
 
@@ -99,7 +100,8 @@ class Store:
 
 
 class OAuthServer:
-    def __init__(self) -> None:
+    def __init__(self, users=None) -> None:
+        self.users = users                 # mcp_http.users.Users, or None
         self.base = _env("PUBLIC_URL").rstrip("/")
         allow_http = _env("OAUTH_ALLOW_HTTP").lower() in ("1", "true", "yes")
         if not self.base:
@@ -113,9 +115,14 @@ class OAuthServer:
             raise SystemExit(f"PUBLIC_URL is not a plain base URL: {self.base!r}")
         self.user = _env("OAUTH_USER") or "admin"
         self.password = os.environ.get("OAUTH_PASSWORD", "")
-        if len(self.password) < 12:
-            raise SystemExit("MCP_AUTH=oauth needs OAUTH_PASSWORD with at least 12 "
-                             "characters: it approves who may run Python here")
+        if self.password and len(self.password) < 12:
+            raise SystemExit("OAUTH_PASSWORD needs at least 12 characters: it "
+                             "approves who may run Python here")
+        if not self.password and self.users is None:
+            raise SystemExit("MCP_AUTH=oauth needs OAUTH_PASSWORD (12+ characters) "
+                             "or the user list (USERS_DB)")
+        if not self.password:
+            log("oauth: no OAUTH_PASSWORD; users of the user list who may use MCP approve clients")
         raw = [u.strip() for u in _env("OAUTH_REDIRECT_URIS").split(",") if u.strip()]
         self.redirects = [urlsplit(u) for u in (raw or DEFAULT_REDIRECTS)]
         self.access_ttl = int(_env("OAUTH_ACCESS_TOKEN_SECONDS") or 3600)
@@ -151,19 +158,26 @@ class OAuthServer:
                 "authorization_response_iss_parameter_supported": True}
 
     # ---- tokens --------------------------------------------------------------
-    def valid_access_token(self, token: str) -> bool:
+    def access_user(self, token: str) -> str | None:
+        """Who a valid access token was given to: a user of the list, ""
+        for OAUTH_USER (every right); None when the token is not valid."""
         with self.store.lock:
             entry = self.store.access.get(_hash(token))
-            return (entry is not None and entry["exp"] > time.time()
-                    and entry["client_id"] in self.store.clients)
+            if (entry is None or entry["exp"] <= time.time()
+                    or entry["client_id"] not in self.store.clients):
+                return None
+            return entry.get("user", "")
 
-    def _issue(self, client_id: str) -> dict:
+    def valid_access_token(self, token: str) -> bool:
+        return self.access_user(token) is not None
+
+    def _issue(self, client_id: str, user: str = "") -> dict:
         access, refresh = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         now = time.time()
         with self.store.lock:
-            self.store.access[_hash(access)] = {"client_id": client_id,
+            self.store.access[_hash(access)] = {"client_id": client_id, "user": user,
                                                 "exp": now + self.access_ttl}
-            self.store.refresh[_hash(refresh)] = {"client_id": client_id,
+            self.store.refresh[_hash(refresh)] = {"client_id": client_id, "user": user,
                                                   "exp": now + self.refresh_ttl}
             self.store.clients[client_id]["last_used"] = int(now)
             self.store.save()
@@ -290,9 +304,16 @@ class OAuthServer:
             return self.error_redirect(req, OAuthError("access_denied", "the user said no")), ""
         if self._throttled():
             return None, "Too many wrong passwords. Wait 15 minutes."
-        ok = (hmac.compare_digest(form.get("user", "").encode(), self.user.encode())
-              & hmac.compare_digest(form.get("password", "").encode(), self.password.encode()))
-        if not ok:
+        name, pw = form.get("user", "").strip(), form.get("password", "")
+        user = None
+        if self.password and (hmac.compare_digest(name.encode(), self.user.encode())
+                              & hmac.compare_digest(pw.encode(), self.password.encode())):
+            user = ""                                   # OAUTH_USER: every right
+        elif self.users is not None:
+            acc = self.users.authenticate(name, pw)
+            if acc is not None and acc.mcp:
+                user = acc.name
+        if user is None:
             self.failures.append(time.time())
             time.sleep(1.0)
             return None, "Wrong user name or password."
@@ -301,8 +322,8 @@ class OAuthServer:
         now = time.time()
         for k in [k for k, v in self.codes.items() if v["t"] < now - CODE_TTL]:
             del self.codes[k]
-        self.codes[code] = {**req, "t": now}
-        log(f"oauth: {self.user} approved {req['client_name']!r} ({req['client_id']})")
+        self.codes[code] = {**req, "t": now, "user": user}
+        log(f"oauth: {user or self.user} approved {req['client_name']!r} ({req['client_id']})")
         params = {"code": code, "iss": self.base}
         if req.get("state"):
             params["state"] = req["state"]
@@ -342,7 +363,7 @@ class OAuthServer:
             verifier = form.get("code_verifier", "")
             if not verifier or not hmac.compare_digest(_s256(verifier), code["code_challenge"]):
                 raise OAuthError("invalid_grant", "PKCE verification failed")
-            return self._issue(cid)
+            return self._issue(cid, code.get("user", ""))
         if grant == "refresh_token":
             key = _hash(form.get("refresh_token", ""))
             with self.store.lock:
@@ -350,7 +371,7 @@ class OAuthServer:
                 if entry is None or entry["exp"] < time.time() or entry["client_id"] != cid:
                     self.store.save()
                     raise OAuthError("invalid_grant", "unknown, used or expired refresh token")
-            return self._issue(cid)
+            return self._issue(cid, entry.get("user", ""))
         raise OAuthError("unsupported_grant_type", f"grant_type {grant!r} is not supported")
 
     # ---- HTTP ------------------------------------------------------------------
@@ -465,7 +486,7 @@ input{{width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--
 <p><strong>{escape(req['client_name'])}</strong> <span class="muted">({escape(host)})</span>
 wants to use this IngeTrazo server. It could open, change and save models, and run Python in the container.</p>
 {err}<form method="post" action="/authorize"><input type="hidden" name="tx" value="{escape(tx)}">
-<label for="u">User</label><input id="u" name="user" autocomplete="username" value="{escape(self.user)}">
+<label for="u">User</label><input id="u" name="user" autocomplete="username" value="{escape(self.user if self.password else '')}">
 <label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" autofocus>
 <div class="row"><button class="no" name="decision" value="deny" formnovalidate>Deny</button>
 <button class="ok" name="decision" value="allow">Allow</button></div></form>"""

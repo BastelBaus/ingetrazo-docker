@@ -351,14 +351,14 @@ class Auth:
         if self.mode != "local":
             return None
         acc = self.users.authenticate(name, pw)
-        return User.of(acc) if acc else None
+        return User.of(acc) if acc and acc.web else None
 
     def guest_login(self) -> User | None:
         """``VIEWER_GUEST``: the guest user, unless an admin switched it off."""
         if not self.guest:
             return None
         acc = self.users.guest()
-        return User.of(acc) if acc else None
+        return User.of(acc) if acc and acc.web else None
 
     def current(self, user: User) -> User | None:
         """A session's user as the list has them now: None when removed or
@@ -368,7 +368,7 @@ class Auth:
         acc = self.users.get(user.name)
         if acc and acc.source == "guest" and not self.guest:
             return None                       # guests no longer welcome
-        return User.of(acc) if acc and acc.active else None
+        return User.of(acc) if acc and acc.active and acc.web else None
 
     def settings(self, user: User | None) -> dict:
         """The settings ``user`` works with (mcp_http/users.py SETTINGS)."""
@@ -376,8 +376,9 @@ class Auth:
         return Users.settings_of(acc)
 
     def disabled(self, name: str) -> bool:
+        """A known user who may not in: switched off, or no web viewer."""
         acc = self.users.get(name) if self.users is not None and name else None
-        return bool(acc and not acc.active)
+        return bool(acc and (not acc.active or not acc.web))
 
     def _seen(self, name: str, groups: list[str], source: str) -> User | None:
         group = self.admin_group
@@ -390,7 +391,7 @@ class Auth:
         if acc.source != source:
             log(f"viewer: {name!r} came through {source} but is a {acc.source} user; refused")
             return None
-        return User.of(acc) if acc.active else None
+        return User.of(acc) if acc.active and acc.web else None
 
     def from_proxy(self, addr: str, headers) -> User | None:
         found = self.proxy.user(addr, headers)
