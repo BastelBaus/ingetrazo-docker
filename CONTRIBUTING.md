@@ -6,7 +6,9 @@ Thanks for helping! Issues and pull requests are welcome. In short:
 - PR titles follow [Conventional Commits](https://www.conventionalcommits.org): `feat: …`, `fix: …`,
   `docs: …`, `ci: …`, `chore: …`; `feat!: …` marks a breaking change. The title ends up in the release notes.
 - Sign off every commit (`git commit -s`, see [DCO](#developer-certificate-of-origin-dco) below).
-- CI (shellcheck, unit tests, image build, smoke test) must pass. Run locally:
+- The required checks must pass: *DCO* and *smoke* (shellcheck, unit tests, image build, smoke test);
+  PRs into `main` also need a code owner's review (and, later, the full test). See
+  [Branch protection](docs/RELEASING.md#branch-protection). Run locally:
   `python3 -m unittest discover -s tests -p "test_*.py"` and `IMAGE=… tests/smoke.sh`.
 - Fixes for a release being prepared go into `release/vX.Y`.
 
