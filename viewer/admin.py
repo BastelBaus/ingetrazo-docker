@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """The viewer's admin panel (``/admin``) and a user's own page
-(``/account``): plain HTML forms, each with the session's CSRF token.
+(``/account``, with their settings): plain HTML forms, each with the
+session's CSRF token.
 
 Admins add local users (``VIEWER_AUTH_MODE=local``), set a user's role
 (unless the provider's admin group decides it), switch users off and on,
@@ -11,7 +12,7 @@ from __future__ import annotations
 
 from html import escape
 
-from mcp_http.users import ROLES, UserError
+from mcp_http.users import ROLES, SETTINGS, UserError
 
 CSS = """
 .panel{max-width:960px;margin:0 auto}
@@ -156,8 +157,50 @@ def act(auth, user, form: dict) -> tuple[str, str]:
         return "", str(exc)[:1].upper() + str(exc)[1:] + "."
 
 
+#: How the account page names the settings and their values.
+LABELS = {
+    "nav_mode": ("Folders in the View / 3D / Sheet dropdowns",
+                 {"list": "List (every level)", "tree": "Tree (one level at a time)"}),
+    "edges_3d": ("Edges in the 3D view", {True: "On", False: "Off"}),
+}
+
+
+def setting_value(key: str, raw: str):
+    """A setting's value as a form sends it: "" is the default (None)."""
+    if raw == "":
+        return None
+    allowed = SETTINGS.get(key, ((),))[0]
+    if allowed and isinstance(allowed[0], bool):
+        return raw.lower() in ("1", "true", "on", "yes")
+    return raw
+
+
+def _settings_form(auth, user) -> str:
+    from .server import NAV_MODE
+    conf = auth.settings(user)
+    acc = auth.users.get(user.name)
+    own = acc.config if acc else {}
+    fields = []
+    for key, (label, names) in LABELS.items():
+        allowed, default = SETTINGS[key]
+        if default is None:                    # as the container is set up
+            default = NAV_MODE if key == "nav_mode" else allowed[0]
+        opts = [f'<option value="">Default ({escape(names[default])})</option>']
+        for v in allowed:
+            sel = " selected" if key in own and conf[key] == v else ""
+            value = ("1" if v else "0") if isinstance(v, bool) else v
+            opts.append(f'<option value="{value}"{sel}>{escape(names[v])}</option>')
+        fields.append(f'<label for="s-{key}">{escape(label)}</label>'
+                      f'<select id="s-{key}" name="{key}">{"".join(opts)}</select>')
+    return ('<h2>Settings</h2><form class="stack" method="post" action="/account">'
+            f'<input type="hidden" name="csrf" value="{auth.sessions.csrf(user.name)}">'
+            '<input type="hidden" name="action" value="settings">' + "".join(fields)
+            + '<button class="primary">Save</button></form>')
+
+
 def account_page(auth, user, note: str = "", error: str = "", title: str = "") -> bytes:
-    """The user's own page: who they are, and (local users) a new password."""
+    """The user's own page: who they are, their settings, and (local
+    users) a new password."""
     acc = auth.users.get(user.name)
     info = (f'<p>Logged in as <strong>{escape(user.name)}</strong>, {escape(user.role)}'
             f'{", through " + escape(acc.source) if acc and acc.source != "local" else ""}.</p>')
@@ -171,7 +214,8 @@ def account_page(auth, user, note: str = "", error: str = "", title: str = "") -
               '<label for="n">New password</label><input id="n" name="password" type="password" '
               'autocomplete="new-password" required>'
               '<button class="primary">Change password</button></form>')
-    return _wrap("Account", _messages(note, error) + info + pw, user, title)
+    settings = _settings_form(auth, user) if acc else ""
+    return _wrap("Account", _messages(note, error) + info + settings + pw, user, title)
 
 
 def act_account(auth, user, form: dict) -> tuple[str, str]:
@@ -179,6 +223,10 @@ def act_account(auth, user, form: dict) -> tuple[str, str]:
         return (form.get(key) or [""])[0]
 
     try:
+        if get("action") == "settings":
+            auth.users.set_settings(user.name, {k: setting_value(k, get(k)) for k in LABELS
+                                                if k in form})
+            return "Your settings are saved.", ""
         if get("action") == "password":
             if auth.users.authenticate(user.name, get("old")) is None:
                 raise UserError("the current password is wrong")

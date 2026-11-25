@@ -32,6 +32,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from mcp_http import folders
 from mcp_http.appbridge import App, log
+from mcp_http.users import UserError
 
 from . import admin
 from .auth import Auth, User
@@ -137,6 +138,15 @@ section.folder{margin-bottom:28px}
 """
 
 JS = """
+// Saves one of the user's settings (/account/settings); the page keeps
+// working when that fails.
+window.saveSetting = function(key, value){
+  const csrf = document.body.dataset.csrf;
+  if (!csrf) return Promise.resolve(false);
+  const body = new URLSearchParams({csrf: csrf, [key]: String(value)});
+  return fetch('/account/settings', {method: 'POST', body: body, credentials: 'same-origin'})
+    .then(r => r.ok).catch(() => false);
+};
 (function(){
   const slug = document.body.dataset.slug || null;
   // What this page waits for: a listing ("list"), "preview", "sheet:N", …
@@ -183,8 +193,11 @@ JS = """
   function closeAll(except){ dds.forEach(d => { if (d !== except) d.open = false; }); }
   // "list": every level at once; "tree": one level, folders to step into.
   // The server's default (data-nav), or what this browser chose.
+  // A user with an account keeps the choice in their settings (data-nav,
+  // saved below); without one, this browser keeps it.
+  const csrf = document.body.dataset.csrf || '';
   let mode = document.body.dataset.nav === 'tree' ? 'tree' : 'list';
-  try { const m = localStorage.getItem('navmode'); if (m === 'tree' || m === 'list') mode = m; } catch (e) {}
+  if (!csrf) try { const m = localStorage.getItem('navmode'); if (m === 'tree' || m === 'list') mode = m; } catch (e) {}
   const SEP = ' › ';
   function setup(dd){
     const filter = dd.querySelector('.dd-filter');
@@ -239,7 +252,8 @@ JS = """
     if (btn) btn.addEventListener('click', (e) => {
       e.preventDefault();
       mode = mode === 'tree' ? 'list' : 'tree';
-      try { localStorage.setItem('navmode', mode); } catch (err) {}
+      if (csrf) window.saveSetting('nav_mode', mode);
+      else try { localStorage.setItem('navmode', mode); } catch (err) {}
       start(); dds.forEach(d => d._show && d._show());
     });
     dd.addEventListener('toggle', () => {
@@ -281,6 +295,19 @@ def _account(user: User | None) -> str:
     return who + admin + out
 
 
+def _settings(user: User | None) -> str:
+    """The body's data-* attributes with the user's settings, and the token
+    the page's script saves a changed one with (users with an account)."""
+    conf = (auth.settings(user) if hasattr(auth, "settings")
+            else {"nav_mode": None, "edges_3d": True})
+    nav = conf.get("nav_mode") or NAV_MODE
+    out = f' data-nav="{nav}" data-edges="{1 if conf.get("edges_3d", True) else 0}"'
+    if user is not None and getattr(auth, "users", None) is not None \
+            and auth.users.get(user.name) is not None:
+        out += f' data-csrf="{auth.sessions.csrf(user.name)}"'
+    return out
+
+
 def _page(title: str, header: str, body: str, slug: str | None = None,
           bar: bool = False, user: User | None = None,
           wait: list[str] | None = None) -> bytes:
@@ -288,7 +315,7 @@ def _page(title: str, header: str, body: str, slug: str | None = None,
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{escape(title)}</title><style>{CSS}</style></head>
-<body data-slug="{escape(slug or '')}" data-wait="{escape(' '.join(wait or []))}" data-nav="{NAV_MODE}"><header{' class="bar"' if bar else ''}>{header}{'' if bar else '<span class="spacer"></span>'}
+<body data-slug="{escape(slug or '')}" data-wait="{escape(' '.join(wait or []))}"{_settings(user)}><header{' class="bar"' if bar else ''}>{header}{'' if bar else '<span class="spacer"></span>'}
 <span id="live" class="live"><i></i><span>connecting…</span></span>{_account(user)}</header>
 <main>{body}</main><script>{JS}</script></body></html>""".encode("utf-8")
 
@@ -795,6 +822,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == "/login" and auth.mode == "local":
             return self._post_login()
+        if path == "/account/settings" and auth.mode != "none":
+            return self._post_settings()
         if path in ("/admin", "/account") and auth.mode != "none":
             user = self._authorised(path)
             if user is None:
@@ -814,6 +843,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._html(400 if error else 200,
                               admin.account_page(auth, user, note, error, TITLE))
         return self._send(404, b"not found\n", "text/plain")
+
+    def _post_settings(self):
+        """A setting the page's script changed: JSON back, all settings."""
+        user = self._authorised("/account/settings")
+        if user is None:
+            return None
+        form = self._form()
+        if not hmac.compare_digest((form.get("csrf") or [""])[0],
+                                   auth.sessions.csrf(user.name)):
+            return self._send(403, b'{"error": "csrf"}', "application/json")
+        changes = {k: admin.setting_value(k, v[0]) for k, v in form.items() if k != "csrf"}
+        try:
+            conf = auth.users.set_settings(user.name, changes)
+        except UserError as exc:
+            return self._send(400, json.dumps({"error": str(exc)}).encode(), "application/json")
+        return self._send(200, json.dumps(conf).encode(), "application/json",
+                          {"Cache-Control": "no-store"})
 
     def _post_login(self):
         form = self._form()
