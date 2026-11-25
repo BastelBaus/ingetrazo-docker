@@ -1,0 +1,30 @@
+# Weekly: delete dev-<sha> and br-<branch> images older than 30 days and
+# untagged leftovers. Release images (X.Y.Z, X.Y, rc, stable, latest) and
+# :dev stay. A manual run is a dry run unless dry_run is unticked.
+name: GHCR cleanup
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only list what would be deleted"
+        type: boolean
+        default: true
+
+permissions:
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          package: ingetrazo
+          delete-tags: "dev-*,br-*"
+          older-than: 30 days
+          delete-untagged: true
+          delete-partial-images: true
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
