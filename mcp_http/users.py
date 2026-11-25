@@ -68,6 +68,8 @@ MIGRATIONS: list[str | list[str]] = [
          created TEXT NOT NULL,
          last_used TEXT
        )""",
+    # 6: the avatar a user made themself (viewer/avatar.py), as JSON.
+    "ALTER TABLE users ADD COLUMN avatar TEXT",
 ]
 #: A personal MCP token starts with this, so it is recognisable in a config.
 TOKEN_PREFIX = "itz_"
@@ -81,6 +83,14 @@ SETTINGS: dict[str, tuple[tuple, object]] = {
     # The 3D view draws the edges as lines.
     "edges_3d": ((True, False), True),
 }
+
+
+def _json_dict(text: str | None) -> dict | None:
+    try:
+        value = json.loads(text) if text else None
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def _now() -> str:
@@ -121,6 +131,7 @@ class Account:
     shares: list | None = None           # None: DEFAULT_SHARES
     web: bool = True                     # may use the web viewer
     mcp: bool = False                    # may use the MCP server
+    avatar: dict | None = None           # None: made from the name
 
     @property
     def admin(self) -> bool:
@@ -181,7 +192,7 @@ class Users:
                        bool(row["password"]), groups, row["created"], row["last_login"],
                        config if isinstance(config, dict) else {},
                        shares if isinstance(shares, list) or shares is None else [],
-                       bool(row["web"]), bool(row["mcp"]))
+                       bool(row["web"]), bool(row["mcp"]), _json_dict(row["avatar"]))
 
     def get(self, name: str) -> Account | None:
         with self._lock:
@@ -436,6 +447,13 @@ class Users:
             self._db.execute("UPDATE tokens SET last_used = ? WHERE hash = ?", (_now(), key))
         acc = self.get(row["user"])
         return acc if acc and acc.active and acc.mcp else None
+
+    def set_avatar(self, name: str, avatar: dict | None) -> None:
+        """The user's avatar (viewer/avatar.py checks it); None: the default."""
+        acc = self._require(name)
+        with self._lock:
+            self._db.execute("UPDATE users SET avatar = ? WHERE name = ?",
+                             (None if avatar is None else json.dumps(avatar), acc.name))
 
     def ensure_admin(self, name: str, password: str) -> bool:
         """The first admin, from the environment: created when there is no
