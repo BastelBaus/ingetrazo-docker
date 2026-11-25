@@ -249,6 +249,23 @@ class PagesTest(Base):
         self.assertIn('id="stage"', html)
         self.assertIn("model.glb", html)
 
+    def test_shares_hide_models(self):
+        from types import SimpleNamespace
+
+        from mcp_http.users import Users
+        users = Users(Path(self.tmp.name) / "users.db")
+        users.create("anna", "anna-pass")
+        self.server.auth = SimpleNamespace(mode="local", users=users, settings=lambda u: {},
+                                           sessions=SimpleNamespace(csrf=lambda n: "t"))
+        anna = SimpleNamespace(name="anna", admin=False)
+        self.assertIn("house.igz", self.server.overview(anna).decode())   # default: read all
+        users.set_shares("anna", [{"path": "p/other", "access": "r"}])
+        html = self.server.overview(anna).decode()
+        self.assertNotIn("house.igz", html)
+        self.assertIsNone(self.server.model_page(self.slug, anna))
+        users.set_shares("anna", [{"path": "p", "access": "r"}])
+        self.assertIsNotNone(self.server.model_page(self.slug, anna))
+
     def test_dropdowns_view_3d_sheet(self):
         self.r.request(self.slug, "list")
         self.drain()

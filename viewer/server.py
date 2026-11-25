@@ -30,7 +30,7 @@ from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
-from mcp_http import folders
+from mcp_http import folders, shares
 from mcp_http.appbridge import App, log
 from mcp_http.users import UserError
 
@@ -446,11 +446,29 @@ def _problems(lines: list, title: str = "Some parts did not render:") -> str:
             + "<br>".join(escape(x) for x in lines) + "</div>")
 
 
+def _reader(user: User | None):
+    """Whether ``user`` may see a model, by its name from the data folder
+    (their shares, mcp_http/shares.py). Without a user list: everyone."""
+    if user is None or getattr(auth, "users", None) is None:
+        return lambda name: True
+    acc = auth.users.get(user.name)
+    return lambda name: shares.can_read(acc, name)
+
+
+def _folder_rel(f) -> str:
+    return "" if f.root == folders.DATA_DIR else folders.display_name(f.root)
+
+
 def overview(user: User | None = None) -> bytes:
     """Every model, folder by folder, each with a small preview. A model
     without a current preview gets one rendered (``PREVIEW`` priority)."""
-    groups: dict[str, list[str]] = {f.name: [] for f in folders.FOLDERS}
+    may = _reader(user)
+    # A folder shows when the user may see it, or something in it.
+    groups: dict[str, list[str]] = {f.name: [] for f in folders.FOLDERS
+                                    if may(_folder_rel(f) or "*")}
     for m in renderer.models():
+        if not may(m["name"]):
+            continue
         idx, slug = m["index"], m["slug"]
         if not m["fresh"] or renderer.due(idx, "preview"):
             renderer.request(slug, "preview", PREVIEW)
@@ -482,7 +500,7 @@ def overview(user: User | None = None) -> bytes:
             f'<div class="sub">{status}</div></div></a>')
     if not any(groups.values()):
         body = '<p class="empty">No .igz files in the model folders yet.</p>'
-    elif len(folders.FOLDERS) == 1:
+    elif len(groups) == 1:
         body = f'<div class="grid">{"".join(next(iter(groups.values())))}</div>'
     else:
         modes = {f.name: f.mode for f in folders.FOLDERS}
@@ -527,7 +545,8 @@ def model_page(slug: str, user: User | None = None,
     What is on screen is rendered now if it was not yet, its neighbours
     next; until then the page shows the model's last picture of it, if
     there is one."""
-    if renderer.model(slug) is None:
+    m = renderer.model(slug)
+    if m is None or not _reader(user)(m.name):
         return None
     wait: list[str] = []
     if not renderer.fresh(slug):
@@ -859,6 +878,9 @@ class Handler(BaseHTTPRequestHandler):
                 if not user.admin:
                     return self._send(403, b"admins only\n", "text/plain")
                 note, error = admin.act(auth, user, form)
+                if (form.get("action") or [""])[0] == "shares":
+                    return self._html(400 if error else 200, admin.shares_page(
+                        auth, user, (form.get("name") or [""])[0], note, error, TITLE))
                 return self._html(400 if error else 200,
                                   admin.page(auth, user, note, error, TITLE))
             note, error = admin.act_account(auth, user, form)
@@ -974,12 +996,18 @@ class Handler(BaseHTTPRequestHandler):
             if not user.admin:
                 return self._html(403, message_page("Only admins manage the users.", "/", "Back"))
             return self._html(200, admin.page(auth, user, title=TITLE))
+        if path == "/admin/shares" and auth.mode != "none":
+            if not user.admin:
+                return self._html(403, message_page("Only admins manage the users.", "/", "Back"))
+            name = (parse_qs(parts.query).get("name") or [""])[0]
+            return self._html(200, admin.shares_page(auth, user, name, title=TITLE))
         if path == "/account" and auth.mode != "none":
             return self._html(200, admin.account_page(auth, user, title=TITLE))
         if path.startswith("/m/"):
             slug = path[3:]
             query = parse_qs(parts.query)
-            if not _SAFE.match(slug) or renderer.model(slug) is None:
+            m = renderer.model(slug) if _SAFE.match(slug) else None
+            if m is None or not _reader(user)(m.name):
                 return self._send(404, b"no such model\n", "text/plain")
             if (query.get("pdf") or [""])[0] not in ("", "0"):
                 page, url = pdf_page(slug, user)
@@ -991,11 +1019,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, b"no such model\n", "text/plain")
             return self._send(200, page, html, nocache)
         if path.startswith("/files/"):
+            m = renderer.model(path[7:].split("/")[0])
+            if m is None or not _reader(user)(m.name):
+                return self._send(404, b"not found\n", "text/plain")
             return self._file(path[7:])
         if path.startswith("/static/three/"):
             return self._static(path[len("/static/three/"):])
         if path == "/events":
-            return self._events()
+            return self._events(user)
         return self._send(404, b"not found\n", "text/plain")
 
     def _file(self, rest: str):
@@ -1025,7 +1056,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, f.read_bytes(), ctype,
                           {"Cache-Control": "private, max-age=86400"})
 
-    def _events(self):
+    def _events(self, user: User | None = None):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
@@ -1045,7 +1076,11 @@ class Handler(BaseHTTPRequestHandler):
                 # Every event since the last one sent: a "done" may come
                 # right before an "idle".
                 events = renderer.events_since(seen)
+                may = _reader(user)              # shares may change meanwhile
                 for event in events:
+                    m = renderer.model(event["slug"]) if event.get("slug") else None
+                    if event.get("slug") and m is not None and not may(m.name):
+                        continue
                     self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
                 if events:
                     seen = events[-1]["generation"]

@@ -43,6 +43,7 @@ services:
       INGETRAZO_ALLOW_SAVE: ${INGETRAZO_ALLOW_SAVE:-true}
       INGETRAZO_SAVE_FORMAT: ${INGETRAZO_SAVE_FORMAT:-}
       USERS_DB: /users/users.db
+      DEFAULT_SHARES: ${DEFAULT_SHARES:-*:r}
     volumes:
       - ${INGETRAZO_DATA_DIR:-./data}:/data
       - mcp-state:/state
@@ -83,6 +84,7 @@ services:
       VIEWER_NAV_MODE: ${VIEWER_NAV_MODE:-list}
       VIEWER_GLB_MAX_MB: ${VIEWER_GLB_MAX_MB:-50}
       USERS_DB: /users/users.db
+      DEFAULT_SHARES: ${DEFAULT_SHARES:-*:r}
     volumes:
       - ${INGETRAZO_DATA_DIR:-./data}:/data:ro
       - viewer-cache:/cache
