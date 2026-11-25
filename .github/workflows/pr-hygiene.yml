@@ -36,7 +36,7 @@ jobs:
   labels:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/labeler@v5
+      - uses: actions/labeler@v7
         with:
           sync-labels: false
 
