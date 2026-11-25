@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -226,6 +227,24 @@ class ViewerLoginTest(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertIn("switched off", page)
         self.assertEqual(self.req("/login", {"user": "anna", "password": "anna-pass"})[0], 401)
+
+    def test_admin_changes_the_title(self):
+        from viewer import site
+        with mock.patch.dict(os.environ, {"INGETRAZO_STATE": self.tmp.name}):
+            site.reset()
+            try:
+                boss = self.login("boss", "boss-password")
+                token = self.csrf(self.req("/admin", cookie=boss)[2])
+                status, _, page = self.req("/admin", {"action": "title", "title": "Haus 8",
+                                                      "csrf": token}, boss)
+                self.assertEqual(status, 200, page)
+                self.assertIn("<title>Users – Haus 8</title>", page)
+                self.assertIn("<h1>Haus 8</h1>", self.req("/login")[2])
+                self.req("/admin", {"action": "title", "title": "x", "reset": "1",
+                                    "csrf": token}, boss)
+                self.assertIn(f"<h1>{site.DEFAULT_TITLE}</h1>", self.req("/login")[2])
+            finally:
+                site.reset()
 
     def test_the_last_admin_stays(self):
         boss = self.login("boss", "boss-password")

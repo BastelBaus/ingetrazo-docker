@@ -36,7 +36,7 @@ from mcp_http import folders, shares
 from mcp_http.appbridge import App, log
 from mcp_http.users import UserError
 
-from . import admin, avatar, version
+from . import admin, avatar, site, version
 from .auth import Auth, User
 from .render import (CACHE_DIR, GLB_MAX_MB, NEXT, NOW, POLL, PRERENDER, PREVIEW,
                      WITH_PDF, Renderer)
@@ -44,7 +44,6 @@ from .view3d import THREE_DIR, view3d
 
 renderer: Renderer
 auth: Auth
-TITLE = os.environ.get("VIEWER_TITLE", "IngeTrazo viewer")
 #: How the View / 3D / Sheet dropdowns show folders by default: "list"
 #: (every level at once) or "tree" (one level at a time). Each browser can
 #: switch in the dropdown.
@@ -542,7 +541,7 @@ def overview(user: User | None = None) -> bytes:
             + (f'<div class="grid">{"".join(cards)}</div>' if cards
                else '<p class="muted">No models.</p>') + "</section>"
             for name, cards in groups.items())
-    return _page(TITLE, f"<h1>{escape(TITLE)}</h1>", body, user=user,
+    return _page(site.title(), f"<h1>{escape(site.title())}</h1>", body, user=user,
                  wait=["preview"])
 
 
@@ -564,7 +563,7 @@ def _pick(query: dict, sheets: list, views: list,
 
 
 def _opening(slug: str, user: User | None, text: str = "Opening the model…") -> bytes:
-    return _page(TITLE, '<a class="btn" href="/">← All models</a>',
+    return _page(site.title(), '<a class="btn" href="/">← All models</a>',
                  f'<p class="empty">{escape(text)} This page refreshes when it is done.</p>',
                  slug, user=user, wait=["list"])
 
@@ -681,7 +680,7 @@ def model_page(slug: str, user: User | None = None,
               f'<h1 title="{escape(idx["name"])}">{escape(idx["name"])}</h1>'
               + (f'<nav class="navs">{navs}</nav>' if navs else "") + step
               + f'<span class="spacer"></span><span class="meta">read {_when(idx)}</span>{pdf}')
-    return _page(f'{idx["name"]} – {TITLE}', header, prefetch + content, slug,
+    return _page(f'{idx["name"]} – {site.title()}', header, prefetch + content, slug,
                  bar=True, user=user, wait=wait)
 
 
@@ -699,13 +698,13 @@ def pdf_page(slug: str, user: User | None = None) -> tuple[bytes | None, str]:
         return None, _file_url(slug, idx["rev"], st["file"])
     back = f'<a class="btn" href="/m/{quote(slug)}">← {escape(idx["name"])}</a>'
     if not WITH_PDF or not idx.get("sheets"):
-        return _page(TITLE, back, '<p class="empty">There is no PDF of this model.</p>',
+        return _page(site.title(), back, '<p class="empty">There is no PDF of this model.</p>',
                      slug, user=user), ""
     if renderer.due(idx, "pdf"):
         renderer.request(slug, "pdf", NOW)
-        return _page(TITLE, back, _pending("Making the PDF of all sheets…"),
+        return _page(site.title(), back, _pending("Making the PDF of all sheets…"),
                      slug, user=user, wait=["pdf"]), ""
-    return _page(TITLE, back, _problems([st.get("error")], "The PDF could not be made:"),
+    return _page(site.title(), back, _problems([st.get("error")], "The PDF could not be made:"),
                  slug, user=user), ""
 
 
@@ -736,8 +735,8 @@ background:var(--accent);color:#fff;font:inherit;font-weight:600;cursor:pointer}
 def _card(title: str, inner: str) -> bytes:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{escape(title)} – {escape(TITLE)}</title><style>{CSS}{LOGIN_CSS}</style></head>
-<body><main><div class="login"><h1>{escape(TITLE)}</h1>{inner}</div></main></body></html>""".encode("utf-8")
+<title>{escape(title)} – {escape(site.title())}</title><style>{CSS}{LOGIN_CSS}</style></head>
+<body><main><div class="login"><h1>{escape(site.title())}</h1>{inner}</div></main></body></html>""".encode("utf-8")
 
 
 def _guest_button(nxt: str) -> str:
@@ -852,7 +851,7 @@ class Handler(BaseHTTPRequestHandler):
                        {"Location": where + "?next=" + quote(target, safe="")})
         elif auth.mode == "local":
             self._send(401, b"authentication required\n", "text/plain",
-                       {"WWW-Authenticate": f'Basic realm="{TITLE}", charset="UTF-8"'})
+                       {"WWW-Authenticate": f'Basic realm="{site.title()}", charset="UTF-8"'})
         else:
             self._send(401, b"authentication required\n", "text/plain")
         return None
@@ -914,12 +913,12 @@ class Handler(BaseHTTPRequestHandler):
                 note, error = admin.act(auth, user, form)
                 if (form.get("action") or [""])[0] == "shares":
                     return self._html(400 if error else 200, admin.shares_page(
-                        auth, user, (form.get("name") or [""])[0], note, error, TITLE))
+                        auth, user, (form.get("name") or [""])[0], note, error, site.title()))
                 return self._html(400 if error else 200,
-                                  admin.page(auth, user, note, error, TITLE))
+                                  admin.page(auth, user, note, error, site.title()))
             note, error = admin.act_account(auth, user, form)
             return self._html(400 if error else 200,
-                              admin.account_page(auth, user, note, error, TITLE))
+                              admin.account_page(auth, user, note, error, site.title()))
         return self._send(404, b"not found\n", "text/plain")
 
     def _post_settings(self):
@@ -1031,12 +1030,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/admin" and auth.mode != "none":
             if not user.admin:
                 return self._html(403, message_page("Only admins manage the users.", "/", "Back"))
-            return self._html(200, admin.page(auth, user, title=TITLE))
+            return self._html(200, admin.page(auth, user, title=site.title()))
         if path == "/admin/shares" and auth.mode != "none":
             if not user.admin:
                 return self._html(403, message_page("Only admins manage the users.", "/", "Back"))
             name = (parse_qs(parts.query).get("name") or [""])[0]
-            return self._html(200, admin.shares_page(auth, user, name, title=TITLE))
+            return self._html(200, admin.shares_page(auth, user, name, title=site.title()))
         if path.startswith("/avatar/") and path.endswith(".svg") and auth.mode != "none":
             from urllib.parse import unquote
             acc = auth.users.get(unquote(path[8:-4]))
@@ -1046,7 +1045,7 @@ class Handler(BaseHTTPRequestHandler):
                               "image/svg+xml", {"Cache-Control": "private, max-age=86400",
                                                 "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'"})
         if path == "/account" and auth.mode != "none":
-            return self._html(200, admin.account_page(auth, user, title=TITLE))
+            return self._html(200, admin.account_page(auth, user, title=site.title()))
         if path.startswith("/m/"):
             slug = path[3:]
             query = parse_qs(parts.query)
