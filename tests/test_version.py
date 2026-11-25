@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests of the viewer's version line (viewer/version.py)."""
 from __future__ import annotations
 

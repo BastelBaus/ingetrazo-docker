@@ -116,10 +116,11 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `OAUTH_USER` / `OAUTH_PASSWORD` | `admin` / – | `oauth`: who approves clients with every right (password at least 12 characters); optional: users of the user list with *MCP* approve with their own rights |
 | `OAUTH_REDIRECT_URIS` | claude.ai, claude.com, loopback | `oauth`: redirect URIs clients may register (comma-separated) |
 | `VIEWER_AUTH_MODE` | `local` | Viewer login: `local`, `none`, `oidc` or `proxy` (see [Viewer login](#viewer-login)) |
-| `DEFAULT_SHARES` | `*:r` | The folders of a user an admin has not set any for: `path:access; …` with `r`, `rw` or `none`, `*` = every folder (see [Users](#users)) |
+| `DEFAULT_SHARES` | `*:r` | The folders of a user an admin has not set any for: `path:access; …` with `r`, `rw` or `none`, `*` = every folder; paths can be patterns like `**/private:none` (see [Folder patterns](#folder-patterns)) |
 | `VIEWER_GUEST` | `false` | `local` / `oidc`: a *Log in as guest* button on the login page (see [Users](#users)) |
 | `VIEWER_PASSWORD` | – | `local`: the password (user `VIEWER_USER`); login page for browsers, Basic auth for scripts |
 | `VIEWER_PRERENDER` | `previews` | What the viewer renders before anyone looks: `previews`, `none` or `all` (see [Rendering on demand](#rendering-on-demand)) |
+| `VIEWER_TITLE` | `IngeTrazo-docker` | The headline (overview, login page, browser tab); admins can change it at `/admin` → *Title* |
 | `VIEWER_SHEET_DPI` | `120` | Sheet image resolution |
 | `VIEWER_NAV_MODE` | `list` | How the View / 3D / Sheet dropdowns show folders by default: `list` (all levels) or `tree` (one level at a time); each user can switch (kept in their settings) |
 | `VIEWER_GLB_MAX_MB` | `50` | 3D view: a model whose GLB is bigger gets no 3D view (it is still rendered as sheets and views); `0` turns the 3D view off |
@@ -250,11 +251,13 @@ The users live in one SQLite file, `users.db`, on the volume `users` that both s
 - **Avatar**: at `/account` each user makes their own: pick a style (`pattern`, `initials` or `shapes`) and press
   *New* until one fits. It is drawn in the container as SVG from a few values; nothing is uploaded. It shows in the
   top bar and in the admin panel; without one, the initials of the name.
-- **Folders per user**: at `/admin` → *Folders* an admin gives each user model folders, or folders inside them,
-  with *Read*, *Read & write* or *No access* (to carve a folder out of a wider share); the most specific setting
-  wins, and a read-only model folder stays read-only. The viewer shows a user only what they may read; *write*
-  is for saving and exporting through MCP. Admins have everything. A user nobody has set folders for gets
-  `DEFAULT_SHARES` (default `*:r`: every folder, read), e.g. `DEFAULT_SHARES=*:none; projects/public:r`.
+- **Folders per user**: at `/admin` → *Folders* an admin gives each user model folders, folders inside them,
+  single models or [patterns](#folder-patterns), with *Read*, *Read & write* or *No access* (to carve a folder out
+  of a wider share); the most specific setting wins, and a read-only model folder stays read-only. The viewer
+  shows a user only what they may read; *write* is for saving and exporting through MCP. Admins have everything.
+  A user nobody has set folders for gets `DEFAULT_SHARES` (default `*:r`: every folder, read), e.g.
+  `DEFAULT_SHARES=*:none; projects/public:r; **/drafts:none`. The page explains the rules (*How folder access
+  works*), has tooltips on each choice, and *Check a path* tells which share decides for a folder or model.
 - **Web and MCP separately**: each user has two switches in the panel, *Web* (the viewer) and *MCP* (the MCP
   server). New users get *Web* only; admins keep *Web*. A user with *MCP* makes personal tokens at `/account`
   (`Authorization: Bearer itz_…`, for `MCP_AUTH=token`), or logs in on the OAuth consent page (`MCP_AUTH=oauth`)
@@ -274,6 +277,35 @@ The users live in one SQLite file, `users.db`, on the volume `users` that both s
 
 Switching a user off or removing them ends their session at once. A viewer that kept users in `/state/users.json`
 takes them over on its first start.
+
+### Folder patterns
+
+A share (in the admin panel or in `DEFAULT_SHARES`) is `path:access`, where `access` is `r`, `rw` or `none`. The
+path is a path from the data folder: a folder (`projects/2026`), a single model (`projects/2026/house.igz`), `*` for
+every folder, or a **pattern** that includes or excludes many folders and files at once:
+
+| In a pattern | Matches |
+|---|---|
+| `*` | any name within one folder level |
+| `?` | one character |
+| `**` | any number of folders, also none (only alone between slashes: `a/**/b`) |
+
+| Example | Effect |
+|---|---|
+| `**/private:none` | hides every folder named `private`, at any depth |
+| `projects/*/plans:r` | the `plans` folder of each project |
+| `**/*.bak.igz:none` | hides backup copies, wherever they are |
+| `archive/20??/**:r` | everything in `archive/2000` … `archive/2099` |
+| `*:none; projects/*/public:r` | only the public part of every project |
+
+A share that matches a folder covers everything inside it. **Which share decides**: the one that starts to cover
+the model at the deepest folder level (`projects/secret:none` beats `projects:r`; `**/private` on
+`a/b/private/x.igz` counts at level 3). On the same level a plain path beats a pattern, so one folder can be an
+exception to a rule for many, and of two patterns the one with less access wins. Without any share there is no
+access. In the admin panel, *Check a path* shows the share that decides for a given folder or model.
+
+These shares decide who sees what. `MODEL_FOLDERS`' `exclude=` is different: it leaves files out of the listing for
+everyone, and they can still be opened by path.
 
 ### Authentik with OIDC
 
@@ -333,6 +365,15 @@ The path check on `open_document`/`save_document`/imports/exports keeps well-beh
 folders, and out of writing to the `ro` ones. It is not a sandbox against `run_python`: mount `ro` folders
 read-only (`:ro`) for the MCP service too, as the example does, so the file system enforces it as well.
 
+## Contributing
+
+Contributions are welcome. Commits need a DCO sign-off (`git commit -s`); see
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
-GPL-3.0-or-later, like IngeTrazo, which the image contains.
+AGPL-3.0-or-later (see [LICENSE](LICENSE)). The IngeTrazo inside the image stays under its own
+GPL-3.0-or-later; section 13 of the AGPL allows the combination.
+
+If you run a modified version as a network service, the AGPL asks you to offer its users the
+source of that version.

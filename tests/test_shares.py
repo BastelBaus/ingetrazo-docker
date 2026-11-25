@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests of the folder shares (mcp_http/shares.py) and how the viewer
 keeps to them (no container needed):
 
@@ -28,11 +28,44 @@ class AccessTest(unittest.TestCase):
         self.assertEqual(shares.access(s, "projects/secrets/b.igz"), "rw")   # not a prefix
         self.assertEqual(shares.access([], "anything"), "none")
 
+    def test_patterns(self):
+        s = shares.parse("*:r; **/private:none; projects/*/plans:rw; **/*.bak.igz:none; "
+                         "archive/20??/**:rw")
+        self.assertEqual(shares.access(s, "projects/a/house.igz"), "r")
+        self.assertEqual(shares.access(s, "projects/a/private/x.igz"), "none")
+        self.assertEqual(shares.access(s, "private/x.igz"), "none")             # ** = none too
+        self.assertEqual(shares.access(s, "projects/a/plans/p.igz"), "rw")
+        self.assertEqual(shares.access(s, "projects/a/b/plans/p.igz"), "r")     # * is one level
+        self.assertEqual(shares.access(s, "projects/a/plans/private/p.igz"), "none")  # deeper
+        self.assertEqual(shares.access(s, "projects/a/plans/old.bak.igz"), "none")    # a file
+        self.assertEqual(shares.access(s, "archive/2024/x/y.igz"), "rw")
+        self.assertEqual(shares.access(s, "archive/1999/y.igz"), "r")
+        self.assertTrue(shares.is_pattern("**/x") and not shares.is_pattern("a/b"))
+        self.assertFalse(shares.is_pattern(shares.ALL))
+
+    def test_ties_between_shares(self):
+        # On one level a plain folder beats a pattern, either order.
+        for spec in ("projects/*:none; projects/house:r", "projects/house:r; projects/*:none"):
+            s = shares.parse(spec)
+            self.assertEqual(shares.access(s, "projects/house/a.igz"), "r", spec)
+            self.assertEqual(shares.access(s, "projects/other/a.igz"), "none", spec)
+        # Of two patterns on one level, less access wins, either order.
+        for spec in ("projects/*:rw; */house:none", "*/house:none; projects/*:rw"):
+            self.assertEqual(shares.access(shares.parse(spec), "projects/house/a.igz"),
+                             "none", spec)
+        # decide() names the share that decided.
+        s = shares.parse("*:r; **/private:none")
+        self.assertEqual(shares.decide(s, "a/private/b.igz"),
+                         ("none", {"path": "**/private", "access": "none"}))
+        self.assertEqual(shares.decide([], "a.igz"), ("none", None))
+
     def test_parse_and_clean(self):
         self.assertEqual(shares.parse("/projects/2026/ : rw"),
                          [{"path": "projects/2026", "access": "rw"}])
         self.assertEqual(shares.parse("projects"), [{"path": "projects", "access": "r"}])
-        for bad in ("../etc:r", "projects:write", "a/.hidden:r"):
+        self.assertEqual(shares.parse(r"\**\private\:none"),
+                         [{"path": "**/private", "access": "none"}])
+        for bad in ("../etc:r", "projects:write", "a/.hidden:r", "a**/b:r", "**/.*:none"):
             with self.assertRaises(ValueError):
                 shares.parse(bad)
         self.assertEqual(shares.validate([{"path": "a", "access": "r"},
@@ -91,8 +124,41 @@ class EffectiveTest(unittest.TestCase):
         self.users.set_shares("anna", None)
         self.assertIsNone(self.users.get("anna").shares)
 
+    def test_patterns_on_real_folders(self):
+        os.environ["DEFAULT_SHARES"] = "*:none; work/*:rw; work/b:r; **/o.igz:r"
+        anna = self.users.get("anna")
+        self.assertTrue(shares.can_write(anna, "work/a/m.igz"))
+        self.assertEqual(shares.effective(anna, "work/b/n.igz"), "r")       # plain beats pattern
+        self.assertEqual(shares.effective(anna, "lib/o.igz"), "r")          # one file
+        self.users.set_shares("anna", [{"path": "**/a", "access": "none"},
+                                       {"path": "*", "access": "rw"}])
+        anna = self.users.get("anna")
+        self.assertFalse(shares.can_read(anna, "work/a/m.igz"))
+        self.assertTrue(shares.can_write(anna, "work/b/n.igz"))
+        self.assertEqual(shares.effective(anna, "lib/o.igz"), "r")          # ro folder
+
+    def test_admin_page_explains(self):
+        from viewer import admin
+        self.users.set_shares("anna", [{"path": "*", "access": "r"},
+                                       {"path": "**/b", "access": "none"}])
+        anna = self.users.get("anna")
+        self.assertEqual(admin.explain(anna, "work/b/n.igz")[0], "none")
+        self.assertIn("**/b:none", admin.explain(anna, "work/b/n.igz")[1])
+        self.assertIn("capped by the read-only", admin.explain(
+            self.users.get("boss"), "lib/o.igz")[1])
+        self.users.set_shares("anna", [{"path": "lib", "access": "rw"}])
+        got, why = admin.explain(self.users.get("anna"), "lib/o.igz")
+        self.assertEqual(got, "r")
+        self.assertIn("capped by the read-only model folder", why)
+        self.assertEqual(admin.explain(self.users.get("anna"), "work/a/m.igz"),
+                         ("none", "no share covers it"))
+
     def test_tree_for_the_admin_page(self):
         self.assertEqual(shares.tree(), ["work", "work/a", "work/b", "lib"])
+        (folders.DATA_DIR / "work/a/x").mkdir()
+        (folders.DATA_DIR / "work/b/y").mkdir()
+        # Depth first: each folder right above the folders in it.
+        self.assertEqual(shares.tree(), ["work", "work/a", "work/a/x", "work/b", "work/b/y", "lib"])
 
     def test_viewer_shows_only_what_is_shared(self):
         from viewer import server

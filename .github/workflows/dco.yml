@@ -1,0 +1,28 @@
+# Check that every commit of a pull request carries a DCO sign-off
+# (see CONTRIBUTING.md).
+name: DCO
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    name: DCO
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Check Signed-off-by lines
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        # Also accepts remediation commits for commits that are already in
+        # a shared branch (see the script and CONTRIBUTING.md).
+        run: bash .github/scripts/dco-check.sh "$BASE" "$HEAD"

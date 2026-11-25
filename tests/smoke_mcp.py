@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Smoke test of the MCP service: smoke_mcp.py <base-url> <token>"""
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Avatars a user makes themself: a small SVG drawn from a few values
 (``style``, ``seed``, ``hue``), so nothing is uploaded and nothing leaves
 the container.

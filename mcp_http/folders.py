@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """The model folders: where the containers look for .igz files, and which
 of them the MCP service may write to.
 
@@ -40,7 +40,7 @@ DATA_DIR = Path(os.environ.get("INGETRAZO_DATA", "/data")).resolve()
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
-def _glob_re(pattern: str) -> re.Pattern:
+def glob_re(pattern: str) -> re.Pattern:
     """A glob as a regular expression on a /-separated relative path."""
     out, i = [], 0
     while i < len(pattern):
@@ -72,8 +72,8 @@ class Folder:
     exclude: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        self._anywhere = [_glob_re(p) for p in self.exclude if "/" not in p.strip("/")]
-        self._anchored = [_glob_re(p.strip("/")) for p in self.exclude if "/" in p.strip("/")]
+        self._anywhere = [glob_re(p) for p in self.exclude if "/" not in p.strip("/")]
+        self._anchored = [glob_re(p.strip("/")) for p in self.exclude if "/" in p.strip("/")]
 
     @property
     def mode(self) -> str:

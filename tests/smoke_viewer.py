@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Smoke test of the viewer: smoke_viewer.py <base-url> <user> <password>
 
 Runs after smoke_mcp.py, which saved smoke-saved.igz into the shared data
@@ -157,6 +157,14 @@ def main():
         lambda: model_page("smoke-saved.igz"), "smoke-saved.igz to render"))
     assert get("/files/../etc/passwd", BASIC)[0] == 404
     assert get("/files/x/../passwd", BASIC)[0] == 404
+
+    def admin_pages():
+        # The real process (python -m viewer.server): admin.py imports
+        # viewer.server, which must be the copy main() set up.
+        for path in ("/admin", "/account"):
+            status, _, body = get(path, BASIC)
+            assert status == 200, (path, status, body[:200])
+    check("admin and account pages", admin_pages)
     print("== viewer: ok")
 
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Smoke test of several model folders:
 smoke_folders.py <mcp-url> <token> <viewer-url>
 

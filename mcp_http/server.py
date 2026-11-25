@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """MCP over Streamable HTTP for a headless IngeTrazo.
 
 ``POST /mcp`` takes JSON-RPC and answers with JSON (the stateless form of

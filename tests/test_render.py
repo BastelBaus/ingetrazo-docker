@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests of the viewer's on-demand rendering, with a fake IngeTrazo
 (no container needed):
 
@@ -222,7 +222,7 @@ class PagesTest(Base):
         html = self.server.model_page(self.slug, query={"view": ["2"]}).decode()
         self.assertIn('data-wait="view:2"', html)
         self.assertIn("Rendering…", html)
-        self.assertEqual(self.r.queue.pending(self.slug), {"view:2", "view:1", "view:3"})
+        self.assertEqual(self.r.queue.pending(self.slug), {"view:2", "view:1", "sheet:2"})  # Back: Front next, last sheet before
         self.assertEqual(self.r.queue.pop(None)[1], "view:2")     # NOW before NEXT
         self.r._task(self.slug, "view:2", render.NOW)
         html = self.server.model_page(self.slug, query={"view": ["2"]}).decode()
@@ -287,6 +287,23 @@ class PagesTest(Base):
         self.assertIn('href="?3d=1&amp;cam=3" class="on"', html)
         html = self.server.model_page(self.slug, query={"3d": ["1"], "cam": ["99"]}).decode()
         self.assertIn('href="?3d=1" class="on"', html)       # unknown: the whole model
+
+    def test_views_alphabetical(self):
+        self.app.views = ["view 10", "Zimmer", "View 2", "attic"]
+        self.r.request(self.slug, "list")
+        self.drain()
+        html = self.server.model_page(self.slug, query={"view": ["1"]}).decode()
+        panel = html[html.index('data-kind="view"'):html.index('data-kind="3d"')]
+        order = [panel.index(f'>{n}</a>') for n in ("attic", "View 2", "view 10", "Zimmer")]
+        self.assertEqual(order, sorted(order))
+        # Links keep the document's numbers; Prev/Next walk the sorted order.
+        self.assertIn('href="?view=4"', panel)
+        self.assertIn('id="next" href="?view=2"', html)        # view 10 → Zimmer
+        self.assertIn('id="prev" href="?view=3"', html)        # view 10 ← View 2
+
+    def test_natural_key(self):
+        names = ["b", "A10", "a2", "B1"]
+        self.assertEqual(sorted(names, key=self.server._natural), ["a2", "A10", "b", "B1"])
 
     def test_dropdown_rows_know_their_folder(self):
         html = self.server._dropdown("Sheet", [("?sheet=1", "Plan", []),
