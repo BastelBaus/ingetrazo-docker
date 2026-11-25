@@ -330,6 +330,11 @@ The path check on `open_document`/`save_document`/imports/exports keeps well-beh
 folders, and out of writing to the `ro` ones. It is not a sandbox against `run_python`: mount `ro` folders
 read-only (`:ro`) for the MCP service too, as the example does, so the file system enforces it as well.
 
+## Contributing
+
+Contributions are welcome. Commits need a DCO sign-off (`git commit -s`); see
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
 AGPL-3.0-or-later (see [LICENSE](LICENSE)). The IngeTrazo inside the image stays under its own
