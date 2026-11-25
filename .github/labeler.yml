@@ -1,0 +1,19 @@
+# actions/labeler (pr-hygiene.yml): labels by changed paths.
+viewer:
+  - changed-files:
+      - any-glob-to-any-file: viewer/**
+mcp:
+  - changed-files:
+      - any-glob-to-any-file: mcp_http/**
+docker:
+  - changed-files:
+      - any-glob-to-any-file: [Dockerfile, entrypoint.sh, .dockerignore, "compose*.yaml", .env.example]
+ci:
+  - changed-files:
+      - any-glob-to-any-file: .github/**
+tests:
+  - changed-files:
+      - any-glob-to-any-file: tests/**
+documentation:
+  - changed-files:
+      - any-glob-to-any-file: ["*.md", docs/**]
