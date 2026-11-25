@@ -111,9 +111,9 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `INGETRAZO_ALLOW_SAVE` | `true` | Allow `save_document` |
 | `INGETRAZO_SAVE_FORMAT` | – | `json` = plain-JSON `.igz`, diffable in git |
 | `MCP_AUTH` | `token` | `none`, `token` or `oauth` |
-| `MCP_TOKEN` | – | Bearer token, at least 16 characters (`token` mode) |
+| `MCP_TOKEN` | – | Bearer token with every right, at least 16 characters (`token` mode); optional when users use personal tokens (see [Users](#users)) |
 | `PUBLIC_URL` | – | `oauth`: the https URL clients reach the server at |
-| `OAUTH_USER` / `OAUTH_PASSWORD` | `admin` / – | `oauth`: who approves clients (password at least 12 characters) |
+| `OAUTH_USER` / `OAUTH_PASSWORD` | `admin` / – | `oauth`: who approves clients with every right (password at least 12 characters); optional: users of the user list with *MCP* approve with their own rights |
 | `OAUTH_REDIRECT_URIS` | claude.ai, claude.com, loopback | `oauth`: redirect URIs clients may register (comma-separated) |
 | `VIEWER_AUTH_MODE` | `local` | Viewer login: `local`, `none`, `oidc` or `proxy` (see [Viewer login](#viewer-login)) |
 | `DEFAULT_SHARES` | `*:r` | The folders of a user an admin has not set any for: `path:access; …` with `r`, `rw` or `none`, `*` = every folder (see [Users](#users)) |
@@ -248,6 +248,14 @@ The users live in one SQLite file, `users.db`, on the volume `users` that both s
   wins, and a read-only model folder stays read-only. The viewer shows a user only what they may read; *write*
   is for saving and exporting through MCP. Admins have everything. A user nobody has set folders for gets
   `DEFAULT_SHARES` (default `*:r`: every folder, read), e.g. `DEFAULT_SHARES=*:none; projects/public:r`.
+- **Web and MCP separately**: each user has two switches in the panel, *Web* (the viewer) and *MCP* (the MCP
+  server). New users get *Web* only; admins keep *Web*. A user with *MCP* makes personal tokens at `/account`
+  (`Authorization: Bearer itz_…`, for `MCP_AUTH=token`), or logs in on the OAuth consent page (`MCP_AUTH=oauth`)
+  with their name and password. Over MCP they list, open and use only what their folders allow, and save and
+  export only where they have *Read & write*; `run_python` is for admins only, since Python in the container
+  reaches every file. There is one IngeTrazo and one open document for all callers: a tool on a document the
+  caller may not read is refused. `MCP_TOKEN` and `OAUTH_USER` / `OAUTH_PASSWORD` still have every right; with the
+  user list both are optional.
 - **Guest** (`VIEWER_GUEST=true`, for the `local` and `oidc` logins): the login page gets a **Log in as guest**
   button that lets anyone in without a password, as the one user `guest`. The guest has settings like everyone
   else (shared by all guests), is never an admin, and an admin can switch it off in the panel without restarting.

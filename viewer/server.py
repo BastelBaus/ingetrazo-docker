@@ -799,7 +799,8 @@ class Handler(BaseHTTPRequestHandler):
         if self._is_disabled():
             if page:
                 self._html(403, message_page(
-                    "Your account is switched off. Ask an admin of this viewer.",
+                    "Your account may not use this viewer (switched off, or MCP only). "
+                    "Ask an admin of this viewer.",
                     "/logout" if auth.mode != "proxy" else "", "Log out"),
                     {"Set-Cookie": f"{COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"})
             else:
@@ -911,6 +912,8 @@ class Handler(BaseHTTPRequestHandler):
         pw = (form.get("password") or [""])[0]
         nxt = _safe_next((form.get("next") or ["/"])[0])
         user = auth.login(name, pw)
+        if user is None and auth.users.authenticate(name, pw) is not None:
+            return self._login_page(403, "This account may not use the web viewer.", nxt)
         if user is not None:
             return self._send(303, b"", "text/plain", {
                 "Location": nxt, "Set-Cookie": self._session_cookie(user)})
