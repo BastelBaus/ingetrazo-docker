@@ -1,0 +1,84 @@
+# After a release PR (release/vX.Y -> main) or a hotfix PR (hotfix/* -> main)
+# is merged: tag vX.Y.Z on main, GitHub release with notes, publish
+# (:X.Y.Z, :X.Y, :stable, :latest) and a back-merge PR main -> dev.
+#
+# release/vX.Y: X.Y.Z of its newest release candidate.
+# hotfix/*:     one patch above the newest release.
+name: Release finalize
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: release-finalize
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    if: >-
+      github.event.pull_request.merged &&
+      (startsWith(github.head_ref, 'release/v') || startsWith(github.head_ref, 'hotfix/'))
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Version
+        id: v
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          last=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+          if [[ $HEAD_REF == release/v* ]]; then
+            # The PR head, also after a squash merge or a deleted branch.
+            git fetch -q origin "pull/$PR/head"
+            xy="${HEAD_REF#release/v}"
+            rc=$(git tag --merged FETCH_HEAD -l "v$xy.*-rc.*" | sort -V | tail -1)
+            [[ -n $rc ]] || { echo "::error::no release candidate on $HEAD_REF"; exit 1; }
+            tag="${rc%-rc.*}"
+            if [[ $(git rev-list -n1 "$rc") != $(git rev-parse FETCH_HEAD) ]]; then
+              echo "::warning::$HEAD_REF has commits after $rc that were never a release candidate"
+            fi
+          else
+            [[ -n $last ]] || { echo "::error::a hotfix needs an earlier release"; exit 1; }
+            tag="${last%.*}.$(( ${last##*.} + 1 ))"
+          fi
+          if git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
+            echo "::error::$tag exists already"; exit 1
+          fi
+          { echo "tag=$tag"; echo "prev=$last"; } >> "$GITHUB_OUTPUT"
+
+      - name: Tag, release, publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
+          PREV: ${{ steps.v.outputs.prev }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" --target "$SHA" --title "$TAG" --latest \
+            --generate-notes ${PREV:+--notes-start-tag "$PREV"}
+          gh workflow run publish.yml --ref "$TAG"
+          echo "### Released $TAG (images \`:${TAG#v}\`, \`:stable\`, \`:latest\`)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Back-merge PR main -> dev
+        env:
+          # PRs opened with GITHUB_TOKEN start no CI; see release-start.yml.
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          gh pr create --base dev --head main \
+            --title "chore(release): back-merge $TAG into dev" \
+            --body "Brings the fixes of $TAG (release branch / hotfix) back into \`dev\`. Merge with **Create a merge commit**." \
+          || echo "::warning::no back-merge PR opened (nothing to merge, or one is open already)"
