@@ -1,0 +1,79 @@
+# Merges a PR into dev by itself once its checks (smoke, DCO, title) are
+# green and it has no conflicts. Not for drafts, PRs from forks or PRs
+# labelled "no-automerge"; a conflict gets a comment and no merge.
+#
+# pull_request_target: runs with dev's copy of this workflow (workflow_run
+# would need it on main, the default branch). It never checks out the PR's
+# code. A merge made with the workflow token does not start the push
+# workflows, so it starts "Publish" on dev itself.
+name: Auto-merge
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    branches: [dev]
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  actions: write
+
+concurrency:
+  group: automerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  automerge:
+    if: >-
+      !github.event.pull_request.draft
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && !contains(github.event.pull_request.labels.*.name, 'no-automerge')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      SHA: ${{ github.event.pull_request.head.sha }}
+      CHECKS: "smoke DCO title"
+    steps:
+      - name: Wait for the checks
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 160); do                    # up to ~80 minutes
+            state=ok
+            for name in $CHECKS; do
+              # The newest run of that check on the PR's head commit.
+              r=$(gh api "repos/$GH_REPO/commits/$SHA/check-runs?check_name=$name&per_page=1" \
+                    --jq '.check_runs[0] | "\(.status) \(.conclusion)"' 2>/dev/null || true)
+              case "$r" in
+                "completed success"|"completed skipped"|"completed neutral") ;;
+                completed*) echo "::notice::$name failed ($r): no auto-merge"; exit 0 ;;
+                *) state=wait ;;
+              esac
+            done
+            [ "$state" = ok ] && exit 0
+            sleep 30
+          done
+          echo "::warning::the checks did not finish in time"; exit 1
+
+      - name: Merge when there is no conflict
+        run: |
+          set -euo pipefail
+          # GitHub works out mergeability in the background: ask a few times.
+          for _ in $(seq 1 10); do
+            m=$(gh pr view "$PR" --json mergeable --jq .mergeable)
+            [ "$m" != UNKNOWN ] && break
+            sleep 6
+          done
+          if [ "$m" = CONFLICTING ]; then
+            gh pr comment "$PR" --body "Auto-merge: this PR has conflicts with \`dev\`; resolve them and it merges by itself once the checks are green."
+            exit 0
+          fi
+          if [ "$m" != MERGEABLE ]; then
+            echo "::warning::mergeable is $m: no auto-merge"; exit 0
+          fi
+          # Only the commit the checks ran on.
+          gh pr merge "$PR" --merge --match-head-commit "$SHA"
+          gh workflow run publish.yml --ref dev
