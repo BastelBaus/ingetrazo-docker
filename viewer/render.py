@@ -324,6 +324,51 @@ class Renderer:
                         "rendering": m.slug in busy})
         return out
 
+    def status(self) -> list[dict]:
+        """For the admin's render list (``/admin/renders``): every model with
+        each saved view, sheet, 3D model and PDF and how far its render is:
+        ``rendered``, ``outdated`` (rendered, but the model changed since),
+        ``rendering``, ``queued``, ``failed``, ``skipped`` or ``missing``."""
+        busy = {w.rendering for w in self.workers if w.rendering}
+        out = []
+        for m in sorted(self._models.values(),
+                        key=lambda m: (m.folder.name.casefold(), m.rel.casefold())):
+            idx, fresh = self.index(m.slug), self.fresh(m.slug)
+            pending = self.queue.pending(m.slug)
+            entry = {"slug": m.slug, "name": m.name, "folder": m.folder.name,
+                     "rel": m.rel, "fresh": fresh, "listed": idx is not None,
+                     "listing": (m.slug, "list") in busy or "list" in pending,
+                     "errors": list((idx or {}).get("errors") or []), "items": []}
+            for item in (self._items(idx) if idx else []):
+                if item == "preview":
+                    continue
+                kind, _, n = item.partition(":")
+                e = {"item": item, "kind": kind, "name": {"glb": "3D model", "pdf": "PDF"}.get(kind, ""),
+                     "folder": []}
+                if kind in ("view", "sheet"):
+                    src = (idx.get(kind + "s") or [])[int(n) - 1]
+                    e["name"], e["folder"] = src.get("name", ""), _path(src.get("folder"))
+                st = self.state(idx, item)
+                if (m.slug, item) in busy:
+                    e["status"] = "rendering"
+                elif st.get("file"):
+                    e["status"] = "rendered" if fresh else "outdated"
+                elif st.get("note"):
+                    e["status"], e["detail"] = "skipped", st["note"]
+                elif st.get("error"):
+                    e["status"], e["detail"] = "failed", st["error"]
+                elif item in pending or "all" in pending:
+                    e["status"] = "queued"
+                else:
+                    e["status"] = "missing"
+                if st.get("seconds") is not None and e["status"] in ("rendered", "outdated"):
+                    e["seconds"] = st["seconds"]
+                if st.get("at"):
+                    e["at"] = st["at"]
+                entry["items"].append(e)
+            out.append(entry)
+        return out
+
     # ---- the listings --------------------------------------------------------
     def index(self, slug: str) -> dict | None:
         """The model's latest listing (never to be changed by the caller)."""
