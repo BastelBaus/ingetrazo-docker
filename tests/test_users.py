@@ -155,8 +155,8 @@ class ViewerLoginTest(unittest.TestCase):
         from viewer import auth as auth_mod
         from viewer import server
         self.tmp = tempfile.TemporaryDirectory()
-        self.env = {"VIEWER_AUTH_MODE": "local", "VIEWER_USER": "boss",
-                    "VIEWER_PASSWORD": "boss-password",
+        self.env = {"VIEWER_AUTH_MODE": "local", "ADMIN_USER": "boss",
+                    "ADMIN_PASSWORD": "boss-password",
                     "USERS_DB": str(Path(self.tmp.name) / "users.db")}
         self.saved_env = {k: os.environ.get(k) for k in self.env}
         os.environ.update(self.env)
@@ -451,7 +451,7 @@ class ViewerLoginTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 401)
 
     def test_restart_keeps_users_but_not_the_env_password(self):
-        """VIEWER_PASSWORD only makes the first admin."""
+        """ADMIN_PASSWORD only makes the first admin."""
         from viewer import auth as auth_mod
         boss = self.login("boss", "boss-password")
         token = self.csrf(self.req("/account", cookie=boss)[2])
@@ -461,10 +461,30 @@ class ViewerLoginTest(unittest.TestCase):
         self.assertIsNone(self.server.auth.login("boss", "boss-password"))
         self.assertIsNotNone(self.server.auth.login("boss", "changed-pass"))
 
+    def test_first_admin_is_admin_and_old_names_still_work(self):
+        """ADMIN_USER defaults to admin; VIEWER_USER / VIEWER_PASSWORD
+        still make the first admin when the new names are not set."""
+        from viewer import auth as auth_mod
+        for k in ("ADMIN_USER", "ADMIN_PASSWORD"):
+            os.environ.pop(k, None)
+        os.environ["USERS_DB"] = str(Path(self.tmp.name) / "default.db")
+        os.environ["VIEWER_PASSWORD"] = "old-password"
+        try:
+            a = auth_mod.Auth()
+            self.assertEqual(a.user_name, "admin")
+            self.assertIsNotNone(a.login("admin", "old-password"))
+            os.environ["USERS_DB"] = str(Path(self.tmp.name) / "old.db")
+            os.environ["VIEWER_USER"] = "viewer"
+            a = auth_mod.Auth()
+            self.assertIsNotNone(a.login("viewer", "old-password"))
+        finally:
+            os.environ.pop("VIEWER_PASSWORD", None)
+            os.environ.pop("VIEWER_USER", None)
+
     def test_no_admin_no_password_refuses_to_start(self):
         from viewer import auth as auth_mod
         os.environ["USERS_DB"] = str(Path(self.tmp.name) / "empty.db")
-        os.environ.pop("VIEWER_PASSWORD")
+        os.environ.pop("ADMIN_PASSWORD")
         with self.assertRaises(SystemExit) as ctx:
             auth_mod.Auth()
         self.assertIn("VIEWER_AUTH_MODE=none", str(ctx.exception))

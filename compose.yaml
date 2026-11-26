@@ -62,7 +62,10 @@ services:
     environment:
       HEALTH_PORT: "8080"
       VIEWER_AUTH_MODE: ${VIEWER_AUTH_MODE:-local}
-      VIEWER_USER: ${VIEWER_USER:-viewer}
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # The old names, still read when ADMIN_USER / ADMIN_PASSWORD are not set:
+      VIEWER_USER: ${VIEWER_USER:-}
       VIEWER_PASSWORD: ${VIEWER_PASSWORD:-}
       VIEWER_GUEST: ${VIEWER_GUEST:-false}
       OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
