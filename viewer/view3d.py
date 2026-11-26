@@ -4,6 +4,11 @@ with the mouse or a finger (OrbitControls), with the edges drawn as lines
 and the saved views as camera presets – picked in the top bar's 3D
 dropdown (server.py), which turns the camera here without a reload.
 
+When the GLB carries IngeTrazo's layers (``export_file(layers=True)``,
+ingelibre/ingetrazo#1684: ``extras.ingetrazo_layer`` on every node and
+``asset.extras.ingetrazo_layers``), a Layers panel switches them, and a
+saved view shows its own layers (its ``hidden_layers``) with its camera.
+
 three.js is not in this repo: the Dockerfile fetches a pinned release
 (checksummed) into ``viewer/static/three/``, and server.py serves it under
 ``/static/three/`` behind the viewer's login, so the page needs no CDN.
@@ -25,6 +30,14 @@ color:#6b6b66;font-size:14px;pointer-events:none;text-align:center;padding:16px}
 .stage .status[hidden]{display:none}
 .stage figcaption{flex-wrap:wrap;align-items:center}
 .stage .btn{cursor:pointer;font:inherit;font-size:13px}
+.stage .layers{position:absolute;top:8px;right:8px;max-height:calc(100% - 16px);overflow:auto;
+background:var(--sheet);border:1px solid #d6d6d0;border-radius:6px;padding:8px 10px;font-size:13px;
+box-shadow:0 2px 8px rgba(0,0,0,.12);min-width:160px}
+.stage .layers[hidden]{display:none}
+.stage .layers label{display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer;white-space:nowrap}
+.stage .layers .sw{width:10px;height:10px;border-radius:2px;border:1px solid rgba(0,0,0,.25);flex:none}
+.stage .layers .all{display:flex;gap:6px;margin-bottom:6px}
+.stage .layers .all button{font:inherit;font-size:12px;cursor:pointer}
 @media (max-width:820px){.stage .canvas{height:70vh}.stage .hint{display:none}}
 """
 
@@ -90,7 +103,7 @@ scene.add(camera);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.screenSpacePanning = true;
-let model = null, edges = null, size = 1;
+let model = null, edges = null, edgesOn = false, size = 1;
 
 function draw() {
   // Near and far follow the camera: close to a wall and across the site.
@@ -144,22 +157,23 @@ function preset(i) {
 
 function showEdges(on) {
   if (on && !edges && model) {
-    edges = new THREE.Group();
+    // Each mesh's edge lines hang below the mesh itself, so a layer that
+    // is switched off takes its lines along.
+    edges = [];
     const mat = new THREE.LineBasicMaterial({ color: 0x1d1d1b });
     const made = new Map();          // copies of a component share one geometry
-    model.updateMatrixWorld(true);
-    model.traverse((o) => {
-      if (!o.isMesh) return;
+    const meshes = [];
+    model.traverse((o) => { if (o.isMesh) meshes.push(o); });
+    for (const o of meshes) {
       let g = made.get(o.geometry);
       if (!g) { g = new THREE.EdgesGeometry(o.geometry, 25); made.set(o.geometry, g); }
       const line = new THREE.LineSegments(g, mat);
-      line.matrixAutoUpdate = false;
-      line.matrix.copy(o.matrixWorld);
-      edges.add(line);
-    });
-    scene.add(edges);
+      o.add(line);
+      edges.push(line);
+    }
   }
-  if (edges) edges.visible = on;
+  edgesOn = on;
+  if (edges) for (const line of edges) line.visible = on;
   edgeBtn.classList.toggle('on', on);
   edgeBtn.setAttribute('aria-pressed', String(on));
   draw();
@@ -171,13 +185,84 @@ function saveEdges(on) {
 }
 
 edgeBtn.addEventListener('click', () => {
-  const on = !(edges && edges.visible);
+  const on = !edgesOn;
   showEdges(on);
   saveEdges(on);
 });
+// ---- layers (a GLB written with layers=True) --------------------------------
+const panel = stage.querySelector('.layers');
+const layerBtn = document.getElementById('layers');
+let layers = [];                      // [{name, visible, color}] as saved
+const shown = new Set();              // the layers switched on now
+
+function applyLayers() {
+  if (!model || !layers.length) return;
+  model.traverse((o) => {
+    const own = o.userData && o.userData.ingetrazo_layer;
+    if (own === undefined) return;
+    const above = o.userData.ingetrazo_parent_layers || [];
+    o.visible = shown.has(own) && above.every((n) => shown.has(n));
+  });
+  panel.querySelectorAll('input[data-layer]').forEach((b) => {
+    b.checked = shown.has(b.dataset.layer);
+  });
+  draw();
+}
+function setLayers(names) {
+  shown.clear();
+  for (const n of names) shown.add(n);
+  applyLayers();
+}
+// As saved, or as a saved view shows them: every layer but its hidden ones.
+function savedLayers() { return layers.filter((l) => l.visible).map((l) => l.name); }
+function viewLayers(i) {
+  const c = cameras[i];
+  if (!c || !Array.isArray(c.hidden_layers)) return savedLayers();
+  const hidden = new Set(c.hidden_layers);
+  return layers.map((l) => l.name).filter((n) => !hidden.has(n));
+}
+function buildPanel() {
+  if (!layers.length) return;
+  const all = document.createElement('div');
+  all.className = 'all';
+  for (const [label, pick] of [['All', () => layers.map((l) => l.name)], ['None', () => []]]) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.addEventListener('click', () => setLayers(pick()));
+    all.appendChild(b);
+  }
+  panel.appendChild(all);
+  for (const l of layers) {
+    const row = document.createElement('label');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.dataset.layer = l.name;
+    box.addEventListener('change', () => {
+      if (box.checked) shown.add(l.name); else shown.delete(l.name);
+      applyLayers();
+    });
+    const sw = document.createElement('span');
+    sw.className = 'sw';
+    const c = (l.color || [1, 1, 1]).map((v) => Math.round(255 * v));
+    sw.style.background = `rgb(${c[0]},${c[1]},${c[2]})`;
+    const name = document.createElement('span');
+    name.textContent = l.name;
+    row.append(box, sw, name);
+    panel.appendChild(row);
+  }
+  layerBtn.hidden = false;
+}
+layerBtn.addEventListener('click', () => {
+  panel.hidden = !panel.hidden;
+  layerBtn.classList.toggle('on', !panel.hidden);
+  layerBtn.setAttribute('aria-pressed', String(!panel.hidden));
+});
+
 function choose(i) {
   mark(i);
   preset(i);
+  setLayers(i < 0 ? savedLayers() : viewLayers(i));
   // The address names the camera, so a link opens the same one (?3d=1&cam=N).
   const u = new URL(location.href);
   if (i < 0) u.searchParams.delete('cam'); else u.searchParams.set('cam', String(i + 1));
@@ -194,7 +279,7 @@ if (dd) dd.addEventListener('click', (e) => {
 // A render that finished reloads the page: the camera stays where it was.
 window.addEventListener('pagehide', () => store(sessionStorage, camKey, JSON.stringify({
   p: camera.position.toArray(), t: controls.target.toArray(), f: camera.fov,
-  c: cur })));
+  c: cur, l: layers.length ? [...shown] : null })));
 
 say('Loading the 3D model…');
 new GLTFLoader().load(stage.dataset.glb, (gltf) => {
@@ -207,6 +292,10 @@ new GLTFLoader().load(stage.dataset.glb, (gltf) => {
     }
   });
   scene.add(model);
+  const extras = (gltf.parser && gltf.parser.json && gltf.parser.json.asset
+                  && gltf.parser.json.asset.extras) || {};
+  layers = Array.isArray(extras.ingetrazo_layers) ? extras.ingetrazo_layers : [];
+  buildPanel();
   size = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3()).length() || 1;
   say('');
   fitSize();
@@ -216,14 +305,18 @@ new GLTFLoader().load(stage.dataset.glb, (gltf) => {
   if (cameras[start] && !(kept && kept.c === start)) {
     mark(start);
     preset(start);
+    setLayers(viewLayers(start));
   } else if (kept && kept.p && kept.t) {
     if (cameras[kept.c]) mark(kept.c);
+    setLayers(Array.isArray(kept.l) ? kept.l
+              : (cameras[kept.c] ? viewLayers(kept.c) : savedLayers()));
     camera.fov = kept.f || 45;
     camera.position.fromArray(kept.p);
     controls.target.fromArray(kept.t);
     controls.update();
   } else {
     fit();
+    setLayers(savedLayers());
   }
   // The user's setting (data-edges), or without an account this browser's.
   const own = document.body.dataset.csrf ? null : load(localStorage, 'edges3d');
@@ -247,10 +340,13 @@ def view3d(glb_url: str, cameras: list, mb: float | None = None) -> str:
     return (f'<style>{CSS}</style>'
             f'<figure class="one stage" id="stage" data-glb="{escape(glb_url)}" '
             f'data-cameras="{escape(json.dumps(cameras))}">'
-            '<div class="canvas"><div class="status"></div></div>'
+            '<div class="canvas"><div class="status"></div>'
+            '<div class="layers" hidden aria-label="Layers"></div></div>'
             '<figcaption><strong>3D</strong>'
             '<button class="btn" id="fit" type="button" title="Show the whole model">Fit</button>'
             '<button class="btn" id="edges" type="button" aria-pressed="true" title="Edges on or off">Edges</button>'
+            '<button class="btn" id="layers" type="button" aria-pressed="false" hidden '
+            'title="Switch layers on or off">Layers</button>'
             '<span class="spacer"></span>'
             '<span class="muted hint">Drag: turn · Right-drag or Shift-drag: move · Wheel: zoom</span>'
             + (f'<a class="muted" href="{escape(glb_url)}" download title="Download the model as glTF binary">'
