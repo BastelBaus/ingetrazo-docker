@@ -64,9 +64,13 @@ closer a branch is to a release:
 |---|---|---|---|
 | `dev` | – | *DCO*, *smoke* | allowed: merges as soon as the checks pass |
 | `release/vX.Y` | – | *DCO*, *smoke* | allowed |
-| `main` | 1 approval by a code owner | *DCO*, *smoke*, *full test* | no: a maintainer merges by hand |
+| `main` | 1 approval by a code owner; admins may bypass it | *DCO*, *smoke*, *full test* | no: a maintainer merges by hand |
 
 On all three branches, force-push and deletion are blocked. Only maintainers may create or delete tags `v*`.
+
+GitHub does not let anyone approve their own PR. So a maintainer (repository admin) may merge their own PR into
+`main` without a review, and only the review can be bypassed: the required checks still apply. PRs from anyone
+else, bots included, need the code owner's approval.
 
 The checks:
 
@@ -84,8 +88,10 @@ The checks:
 Not everything above is configured yet:
 
 - Ruleset *DCO required (dev, main)*: PR required and *DCO* required on `dev` and `main`; force-push and
-  deletion blocked.
-- `main` (classic branch protection): 1 code-owner approval, *smoke* required.
+  deletion blocked. No bypass.
+- Ruleset *main: smoke*: *smoke* required on `main`. No bypass.
+- Ruleset *main: review (admins may bypass)*: 1 code-owner approval on `main`; repository admins may
+  bypass it when they merge a PR.
 - Open: *smoke* as a required check on `dev`; rules for `release/*` and tags `v*`; the *full test*
   workflow and making it required on `main`; `dev` as the default branch (it is still `main`).
 - Auto-merge is switched on for the repository. GitHub cannot switch it off for one branch, so on `main`
