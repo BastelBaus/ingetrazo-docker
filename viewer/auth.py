@@ -3,8 +3,9 @@
 
 - ``local`` (default) – the built-in login: the users of the user list
   (mcp_http/users.py) with a password, managed by admins at ``/admin``.
-  ``VIEWER_USER`` / ``VIEWER_PASSWORD`` make the first admin while there is
-  none. A login page and a session cookie for browsers, Basic auth for
+  ``ADMIN_USER`` (default ``admin``) / ``ADMIN_PASSWORD`` make the first
+  admin while there is none (the older ``VIEWER_USER`` / ``VIEWER_PASSWORD``
+  still work). A login page and a session cookie for browsers, Basic auth for
   scripts. Without any admin and without a password the viewer does not
   start.
 - ``none``   – no login at all, on purpose; a warning in the log.
@@ -301,8 +302,12 @@ class Auth:
             raise SystemExit(f"VIEWER_AUTH_MODE must be one of {', '.join(MODES)}, "
                              f"not {raw!r}")
         self.sessions = Sessions(int(_env("VIEWER_SESSION_DAYS") or 30))
-        self.user_name = _env("VIEWER_USER") or "viewer"
-        password = os.environ.get("VIEWER_PASSWORD", "")
+        # ADMIN_USER / ADMIN_PASSWORD; the older VIEWER_USER / VIEWER_PASSWORD
+        # still work, so an update locks nobody out.
+        self.user_name = _env("ADMIN_USER") or _env("VIEWER_USER") or "admin"
+        password = os.environ.get("ADMIN_PASSWORD", "") or os.environ.get("VIEWER_PASSWORD", "")
+        old = [k for k in ("VIEWER_USER", "VIEWER_PASSWORD") if _env(k)
+               and not _env(k.replace("VIEWER_", "ADMIN_"))]
         self.oidc = OIDC() if self.mode == "oidc" else None
         self.proxy = Proxy() if self.mode == "proxy" else None
         self.users = Users() if self.mode != "none" else None
@@ -312,11 +317,14 @@ class Auth:
                 log(f"viewer: {added} user(s) taken over from users.json")
         if self.mode == "local":
             if password and self.users.ensure_admin(self.user_name, password):
-                log(f"viewer: first admin {self.user_name!r} from VIEWER_USER / VIEWER_PASSWORD")
+                log(f"viewer: first admin {self.user_name!r} from ADMIN_USER / ADMIN_PASSWORD")
+            if old:
+                log(f"viewer: {' / '.join(old)} is the old name; "
+                    + " / ".join(k.replace("VIEWER_", "ADMIN_") for k in old) + " is the new one")
             if not self.users.active_admins():
                 raise SystemExit(
                     "the viewer's login (VIEWER_AUTH_MODE=local, the default) needs "
-                    "VIEWER_PASSWORD for its first admin. For a viewer without any "
+                    "ADMIN_PASSWORD for its first admin. For a viewer without any "
                     "login, say so: VIEWER_AUTH_MODE=none")
         # "Log in as guest": one guest user (mcp_http/users.py GUEST) for
         # whoever does not log in, with a login page to offer it on.

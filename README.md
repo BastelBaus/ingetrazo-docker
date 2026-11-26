@@ -39,7 +39,7 @@ git clone https://github.com/BastelBaus/ingetrazo-docker
 cd ingetrazo-docker
 cp .env.example .env
 # set MCP_TOKEN in .env, e.g. to the output of: openssl rand -hex 32
-# and VIEWER_PASSWORD (or VIEWER_AUTH_MODE=none for a viewer without login)
+# and ADMIN_PASSWORD (or VIEWER_AUTH_MODE=none for a viewer without login)
 mkdir -p data && cp /path/to/*.igz data/
 
 docker compose --profile viewer up -d
@@ -49,7 +49,7 @@ This pulls the prebuilt image `ghcr.io/bastelbaus/ingetrazo:latest` (amd64 and a
 Add `--build` to build it locally instead, e.g. against another `INGETRAZO_REF`.
 
 - MCP: `http://localhost:8765/mcp` (bearer token)
-- Viewer: `http://localhost:8080` (user `viewer`, your `VIEWER_PASSWORD`)
+- Viewer: `http://localhost:8080` (user `admin`, your `ADMIN_PASSWORD`)
 
 Both ports are published on `127.0.0.1` only by default (`MCP_BIND`, `VIEWER_BIND`).
 
@@ -118,7 +118,8 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `VIEWER_AUTH_MODE` | `local` | Viewer login: `local`, `none`, `oidc` or `proxy` (see [Viewer login](#viewer-login)) |
 | `DEFAULT_SHARES` | `*:r` | The folders of a user an admin has not set any for: `path:access; …` with `r`, `rw` or `none`, `*` = every folder; paths can be patterns like `**/private:none` (see [Folder patterns](#folder-patterns)) |
 | `VIEWER_GUEST` | `false` | `local` / `oidc`: a *Log in as guest* button on the login page (see [Users](#users)) |
-| `VIEWER_PASSWORD` | – | `local`: the password (user `VIEWER_USER`); login page for browsers, Basic auth for scripts |
+| `ADMIN_USER` | `admin` | `local`: the name of the first admin |
+| `ADMIN_PASSWORD` | – | `local`: the first admin's password; login page for browsers, Basic auth for scripts. `VIEWER_USER` / `VIEWER_PASSWORD`, the old names, still work |
 | `VIEWER_PRERENDER` | `previews` | What the viewer renders before anyone looks: `previews`, `none` or `all` (see [Rendering on demand](#rendering-on-demand)) |
 | `VIEWER_WORKERS` | `1` | How many IngeTrazos render side by side, 1–16 (see [Rendering on demand](#rendering-on-demand)) |
 | `VIEWER_TITLE` | `IngeTrazo-docker` | The headline (overview, login page, browser tab); admins can change it at `/admin` → *Title* |
@@ -231,7 +232,7 @@ name (`sheet-003-120dpi.png`), so changing `VIEWER_SHEET_DPI` renders anew inste
 
 | Mode | Who gets in | Settings |
 |---|---|---|
-| `local` (default) | The users of the [user list](#users) with a password: a login page and a session cookie for browsers, Basic auth for scripts. `VIEWER_USER` / `VIEWER_PASSWORD` make the first admin. Without any admin and without a password the viewer does **not** start. | `VIEWER_USER`, `VIEWER_PASSWORD` |
+| `local` (default) | The users of the [user list](#users) with a password: a login page and a session cookie for browsers, Basic auth for scripts. `ADMIN_USER` / `ADMIN_PASSWORD` make the first admin. Without any admin and without a password the viewer does **not** start. | `ADMIN_USER`, `ADMIN_PASSWORD` |
 | `none` | Anyone who reaches the port, on purpose (a trusted network, a public showcase). A warning in the log; no Log out button. | – |
 | `oidc` | Users of an OpenID Connect provider (Authentik, Keycloak, …): authorization code flow with PKCE. | `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_REDIRECT_URI`; optional `OIDC_SCOPES`, `OIDC_ADMIN_GROUP`, `OIDC_USERNAME_CLAIM`, `OIDC_GROUPS_CLAIM` |
 | `proxy` | Users a reverse proxy with forward auth (Traefik or nginx with Authentik) has logged in; the proxy names them in a header. The header is believed only from `PROXY_TRUSTED_IPS`. | `PROXY_TRUSTED_IPS`; optional `PROXY_USER_HEADER` (default `X-authentik-username`), `PROXY_GROUPS_HEADER`, `PROXY_ADMIN_GROUP`, `PROXY_LOGOUT_URL` |
@@ -249,8 +250,10 @@ The users live in one SQLite file, `users.db`, on the volume `users` that both s
 - **Admins** manage the list at **`/admin`** (the *Users* button in the top bar): add local users (`local` mode), set
   roles and passwords, switch users off and on, remove them. The list always keeps one active admin, and an admin
   cannot switch themself off or remove themself.
-- **The first admin** comes from `VIEWER_USER` / `VIEWER_PASSWORD` while there is no active admin. After that the
-  list decides: changing `VIEWER_PASSWORD` later does nothing; change the password at `/account` or `/admin`.
+- **The first admin** comes from `ADMIN_USER` (default `admin`) / `ADMIN_PASSWORD` while there is no active admin. After that the
+  list decides: changing `ADMIN_PASSWORD` later does nothing; change the password at `/account` or `/admin`.
+  `VIEWER_USER` / `VIEWER_PASSWORD`, the old names, still work. An existing first admin keeps its name (before:
+  `viewer`); the name comes into play only while there is no active admin.
 - **`oidc` and `proxy`**: a user is added on first login, as `user`. With `OIDC_ADMIN_GROUP` / `PROXY_ADMIN_GROUP`
   set, that group decides who is admin; without it, the admin panel does. Passwords stay with the provider.
 - **Everyone** sees their account at `/account` (their name in the top bar); local users change their password there.

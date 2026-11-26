@@ -72,7 +72,7 @@ docker run -d --name "$mcp" -p "127.0.0.1:$MCP_PORT:8765" \
   -e MCP_AUTH=token -e MCP_TOKEN="$TOKEN" -e INGETRAZO_MODEL=arco.igz \
   -v "$DATA:/data" "$IMAGE" mcp >/dev/null
 docker run -d --name "$viewer" -p "127.0.0.1:$VIEWER_PORT:8080" \
-  -e HEALTH_PORT=8080 -e VIEWER_PASSWORD="$PASSWORD" -e VIEWER_POLL_SECONDS=1 \
+  -e HEALTH_PORT=8080 -e ADMIN_PASSWORD="$PASSWORD" -e VIEWER_POLL_SECONDS=1 \
   -v "$DATA:/data:ro" -v "$CACHE:/cache" "$IMAGE" viewer >/dev/null
 
 TESTS="$(host_path "$HERE")"
@@ -106,7 +106,7 @@ if out="$(docker run --rm -e MCP_AUTH=oauth -e PUBLIC_URL=http://example.org \
 fi
 echo "$out" | grep -q "PUBLIC_URL must be https"
 echo "  ok"
-"$PY" "$TESTS/smoke_viewer.py" "http://127.0.0.1:$VIEWER_PORT" viewer "$PASSWORD"
+"$PY" "$TESTS/smoke_viewer.py" "http://127.0.0.1:$VIEWER_PORT" admin "$PASSWORD"
 
 # Two model folders: work (rw) and library (ro, *.bak.igz not listed).
 mkdir -p "$WORK/folders/work" "$WORK/folders/library"
