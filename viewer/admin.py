@@ -50,6 +50,18 @@ CSS = """
 .panel details.help summary{cursor:pointer;font-weight:600}
 .panel details.help code,.panel td code,.panel .add code,.panel .note code{font-family:ui-monospace,monospace;font-size:12.5px;background:var(--bg);border:1px solid var(--line);border-radius:4px;padding:0 4px}
 .panel details.help table{margin:8px 0}
+.panel .st{display:inline-block;font-size:12px;border-radius:4px;padding:1px 7px;border:1px solid var(--line);white-space:nowrap}
+.panel .st.rendered{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 14%,var(--card))}
+.panel .st.rendering,.panel .st.queued{border-color:var(--warn);background:color-mix(in srgb,var(--warn) 14%,var(--card))}
+.panel .st.failed{border-color:#c0392b;background:color-mix(in srgb,#c0392b 12%,var(--card))}
+.panel .st.outdated,.panel .st.missing,.panel .st.skipped{color:var(--muted)}
+.panel .chips{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
+.panel details.model{margin:10px 0}
+.panel details.model>summary{cursor:pointer;padding:6px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.panel details.model>summary form{margin-left:auto}
+.panel td.detail{font-size:12.5px;color:var(--muted);overflow-wrap:anywhere}
+.panel .sub{display:flex;gap:6px;margin:4px 0 0}
+.panel a.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
 @media (max-width:820px){.panel table,.panel tbody,.panel tr,.panel td{display:block;width:100%}
 .panel thead{display:none}.panel tr{border-bottom:1px solid var(--line)}.panel td{border:0;padding:4px 10px}}
 """
@@ -164,11 +176,100 @@ def page(auth, user, note: str = "", error: str = "", title: str = "") -> bytes:
                  '<button name="reset" value="1">Default</button></form>'
                  '<p class="muted">The headline of the overview and the login page. '
                  f'Default: {escape(site.DEFAULT_TITLE)} (<code>VIEWER_TITLE</code>).</p>')
-    body = (_messages(note, error)
+    body = (_messages(note, error) + _nav("users")
             + '<h2>Users</h2><table><thead><tr><th>User</th><th>Role</th><th>Login</th>'
             '<th>Last login</th><th></th></tr></thead><tbody>' + "".join(rows)
             + "</tbody></table>" + add + site_form)
     return _wrap("Users", body, user, title)
+
+
+def _nav(here: str) -> str:
+    """The admin panel's pages."""
+    return '<nav class="sub">' + "".join(
+        f'<a class="btn{" primary" if key == here else ""}" href="{href}"'
+        + (' aria-current="page"' if key == here else "") + f'>{label}</a>'
+        for key, href, label in (("users", "/admin", "Users"),
+                                 ("renders", "/admin/renders", "Renders"))) + "</nav>"
+
+
+#: The render states (viewer/render.py ``Renderer.status``) as shown.
+STATES = {"rendered": "rendered", "outdated": "outdated", "rendering": "rendering now",
+          "queued": "queued", "failed": "failed", "skipped": "skipped",
+          "missing": "not rendered"}
+KINDS = {"view": "View", "sheet": "Sheet", "glb": "3D", "pdf": "PDF"}
+
+
+def _item_link(slug: str, e: dict) -> str:
+    kind, _, n = e["item"].partition(":")
+    q = {"view": f"?view={n}", "sheet": f"?sheet={n}", "glb": "?3d=1", "pdf": "?pdf=1"}[kind]
+    path = " › ".join(e.get("folder") or [])
+    name = escape(e["name"] or kind)
+    return (f'<a href="/m/{quote(slug)}{q}">{name}</a>'
+            + (f' <span class="muted">({escape(path)})</span>' if path else ""))
+
+
+def renders_page(auth, user, models: list[dict], note: str = "", error: str = "",
+                 title: str = "") -> bytes:
+    """Every saved view, sheet, 3D model and PDF of every model and whether
+    it is rendered (``Renderer.status``), for an admin."""
+    import time as _time
+    total: dict[str, int] = {}
+    blocks = []
+    csrf = auth.sessions.csrf(user.name)
+    for m in models:
+        counts: dict[str, int] = {}
+        rows = []
+        for e in m["items"]:
+            counts[e["status"]] = counts.get(e["status"], 0) + 1
+            when = ""
+            if e.get("at"):
+                when = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(e["at"]))
+                if e.get("seconds") is not None:
+                    when += f" · {e['seconds']} s"
+            rows.append(
+                f'<tr><td>{KINDS.get(e["kind"], e["kind"])}</td><td>{_item_link(m["slug"], e)}</td>'
+                f'<td><span class="st {e["status"]}">{STATES.get(e["status"], e["status"])}</span></td>'
+                f'<td class="muted">{escape(when)}</td>'
+                f'<td class="detail">{escape(e.get("detail", ""))}</td></tr>')
+        for k, v in counts.items():
+            total[k] = total.get(k, 0) + v
+        done = counts.get("rendered", 0)
+        problem = m["errors"] or not m["fresh"] or done < len(m["items"])
+        head = (f'<strong>{escape(m["name"])}</strong> <span class="muted">{escape(m["folder"])}'
+                f' / {escape(m["rel"])}</span> <span class="st {"rendered" if not problem else "queued" if m["listing"] else "missing"}">'
+                f'{done} / {len(m["items"])} rendered</span>'
+                + ("" if m["fresh"] else ' <span class="st outdated">model changed</span>')
+                + (' <span class="st failed">failed to open</span>' if m["errors"] else "")
+                + f'<form class="inline" method="post" action="/admin/renders">'
+                f'<input type="hidden" name="csrf" value="{csrf}">'
+                f'<input type="hidden" name="slug" value="{escape(m["slug"])}">'
+                '<button name="action" value="render" title="Render everything of this model that is not rendered yet">'
+                'Render missing</button></form>')
+        if m["errors"]:
+            table = f'<div class="err">{escape("; ".join(m["errors"]))}</div>'
+        elif not m["listed"]:
+            table = '<p class="muted">Not listed yet: the model was not opened so far.</p>'
+        elif not rows:
+            table = '<p class="muted">No saved views, sheets, 3D model or PDF.</p>'
+        else:
+            table = ('<table><thead><tr><th>Type</th><th>Name</th><th>Status</th>'
+                     '<th>Rendered</th><th></th></tr></thead><tbody>' + "".join(rows)
+                     + "</tbody></table>")
+        blocks.append(f'<details class="model"{" open" if problem else ""}><summary>{head}</summary>'
+                      f'{table}</details>')
+    chips = "".join(f'<span class="st {k}">{total[k]} {STATES[k]}</span>'
+                    for k in STATES if total.get(k))
+    busy = total.get("rendering") or total.get("queued") or any(m["listing"] for m in models)
+    body = (_messages(note, error) + _nav("renders")
+            + f'<h2>Renders</h2><div class="chips">{chips or "<span class=muted>nothing to render</span>"}'
+            f'<form class="inline" method="post" action="/admin/renders">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            '<button name="action" value="render-all">Render all missing</button></form>'
+            '<a class="btn" href="/admin/renders">Refresh</a></div>'
+            + ("".join(blocks) or '<p class="muted">No models.</p>')
+            # While something renders or waits: the page refreshes itself.
+            + ('<script>setTimeout(()=>{location.replace("/admin/renders")},10000)</script>' if busy else ""))
+    return _wrap("Renders", body, user, title)
 
 
 def act(auth, user, form: dict) -> tuple[str, str]:

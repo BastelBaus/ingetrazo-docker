@@ -9,7 +9,8 @@ one model, one sheet or view at a time (``?sheet=N`` / ``?view=N``,
 ``/files/<slug>/<rev>/<f>`` rendered images, PDF and GLB, ``/static/<f>``
 the 3D view's script library (three.js), ``/events`` server-sent events
 (a listing or render started or finished),
-``/admin`` the user list (admins), ``/account`` one's own account,
+``/admin`` the user list (admins), ``/admin/renders`` the render status
+(admins), ``/account`` one's own account,
 ``/avatar/<user>.svg`` a user's avatar,
 ``/version`` the running build (JSON),
 ``/healthz`` (always open). Who may see the rest: ``VIEWER_AUTH_MODE``
@@ -38,7 +39,7 @@ from mcp_http.users import UserError
 
 from . import admin, avatar, site, version
 from .auth import Auth, User
-from .render import (CACHE_DIR, GLB_MAX_MB, NEXT, NOW, POLL, PRERENDER, PREVIEW,
+from .render import (BACKGROUND, CACHE_DIR, GLB_MAX_MB, NEXT, NOW, POLL, PRERENDER, PREVIEW,
                      WITH_PDF, WORKERS, Renderer)
 from .view3d import THREE_DIR, view3d
 
@@ -292,7 +293,8 @@ def _account(user: User | None) -> str:
     role = " (admin)" if user.admin else ""
     who = (f'<a class="muted who" href="/account" title="{escape(user.name + role)}">'
            f'{avatar_img(user.name, 22)}{escape(user.name)}</a>')
-    admin = '<a class="btn" href="/admin" title="Users">Users</a>' if user.admin else ""
+    admin = ('<a class="btn" href="/admin" title="Users and renders">Admin</a>'
+             if user.admin else "")
     out = ('<a class="btn" href="/logout">Log out</a>'
            if auth.mode != "proxy" or auth.proxy.logout_url else "")
     return who + admin + out
@@ -761,6 +763,23 @@ def login_page(error: str, nxt: str) -> bytes:
 <button type="submit">Log in</button></form>""" + _guest_button(nxt))
 
 
+def _render_action(form: dict) -> tuple[str, str]:
+    """``/admin/renders``: render what is missing, of one model or all."""
+    action = (form.get("action") or [""])[0]
+    if action == "render-all":
+        for m in renderer.models():
+            renderer.request(m["slug"], "all", BACKGROUND)
+        return "Everything not rendered yet is queued.", ""
+    if action == "render":
+        slug = (form.get("slug") or [""])[0]
+        m = renderer.model(slug) if _SAFE.match(slug) else None
+        if m is None:
+            return "", "No such model."
+        renderer.request(slug, "all", NEXT)
+        return f"{m.name}: everything not rendered yet is queued.", ""
+    return "", "Unknown action."
+
+
 def message_page(text: str, link: str = "", label: str = "", extra: str = "") -> bytes:
     go = f'<a class="go" href="{escape(link)}">{escape(label)}</a>' if link else ""
     return _card(label or "Viewer", f"<p>{escape(text)}</p>{extra}{go}")
@@ -898,7 +917,7 @@ class Handler(BaseHTTPRequestHandler):
                 "Location": nxt, "Set-Cookie": self._session_cookie(user)})
         if path == "/account/settings" and auth.mode != "none":
             return self._post_settings()
-        if path in ("/admin", "/account") and auth.mode != "none":
+        if path in ("/admin", "/admin/renders", "/account") and auth.mode != "none":
             user = self._authorised(path)
             if user is None:
                 return None
@@ -907,6 +926,12 @@ class Handler(BaseHTTPRequestHandler):
                                        auth.sessions.csrf(user.name)):
                 return self._html(403, message_page("The form expired; open it again.",
                                                     path, "Back"))
+            if path == "/admin/renders":
+                if not user.admin:
+                    return self._send(403, b"admins only\n", "text/plain")
+                note, error = _render_action(form)
+                return self._html(400 if error else 200, admin.renders_page(
+                    auth, user, renderer.status(), note, error, site.title()))
             if path == "/admin":
                 if not user.admin:
                     return self._send(403, b"admins only\n", "text/plain")
@@ -1031,6 +1056,11 @@ class Handler(BaseHTTPRequestHandler):
             if not user.admin:
                 return self._html(403, message_page("Only admins manage the users.", "/", "Back"))
             return self._html(200, admin.page(auth, user, title=site.title()))
+        if path == "/admin/renders" and auth.mode != "none":
+            if not user.admin:
+                return self._html(403, message_page("Only admins see the renders.", "/", "Back"))
+            return self._send(200, admin.renders_page(auth, user, renderer.status(),
+                                                      title=site.title()), html, nocache)
         if path == "/admin/shares" and auth.mode != "none":
             if not user.admin:
                 return self._html(403, message_page("Only admins manage the users.", "/", "Back"))

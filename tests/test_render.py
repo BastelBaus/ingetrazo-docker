@@ -278,6 +278,67 @@ class RenderTest(Base):
         self.assertIn("models", kinds)
 
 
+class StatusTest(Base):
+    """The admin's render list (``Renderer.status``, ``/admin/renders``)."""
+
+    def test_status_of_every_view_sheet_3d_and_pdf(self):
+        [m] = self.r.status()
+        self.assertFalse(m["listed"])
+        self.assertEqual(m["items"], [])
+        self.r.request(self.slug, "view:2")
+        self.drain()
+        [m] = self.r.status()
+        st = {e["item"]: e["status"] for e in m["items"]}
+        self.assertEqual(list(st), ["view:1", "view:2", "view:3", "sheet:1", "sheet:2",
+                                    "glb", "pdf"])
+        self.assertEqual(st["view:2"], "rendered")
+        self.assertEqual(st["pdf"], "missing")
+        names = {e["item"]: (e["name"], e["folder"]) for e in m["items"]}
+        self.assertEqual(names["sheet:2"], ("Section", ["A", "B"]))
+        self.assertEqual(names["glb"], ("3D model", []))
+        self.r.request(self.slug, "pdf", render.LAST)
+        self.assertEqual({e["item"]: e["status"] for e in self.r.status()[0]["items"]}["pdf"],
+                         "queued")
+        self.r.workers[0].rendering = (self.slug, "glb")
+        self.assertEqual({e["item"]: e["status"] for e in self.r.status()[0]["items"]}["glb"],
+                         "rendering")
+        self.r.workers[0].rendering = None
+        self.model.write_bytes(b"two, changed")              # the model changed
+        os.utime(self.model, (time.time() - 60, time.time() - 60))
+        st = {e["item"]: e["status"] for e in self.r.status()[0]["items"]}
+        self.assertEqual(st["view:2"], "outdated")
+
+    def test_failed_render_shows_the_error(self):
+        self.r.request(self.slug, "list")
+        self.drain()
+        rev = self.r.index(self.slug)["rev"]
+        self.r._set_item(self.slug, rev, "glb", {"error": "too big", "at": time.time()})
+        e = {e["item"]: e for e in self.r.status()[0]["items"]}["glb"]
+        self.assertEqual((e["status"], e["detail"]), ("failed", "too big"))
+
+    def test_admin_page(self):
+        from types import SimpleNamespace
+
+        from viewer import admin
+        self.r.request(self.slug, "view:1")
+        self.drain()
+        auth = SimpleNamespace(sessions=SimpleNamespace(csrf=lambda name: "tok"), mode="local")
+        user = SimpleNamespace(name="admin", admin=True)
+        from viewer import server
+        saved = getattr(server, "auth", None)
+        server.auth = SimpleNamespace(mode="none")       # the top bar without an account
+        try:
+            html = admin.renders_page(auth, user, self.r.status(), title="T").decode()
+        finally:
+            server.auth = saved
+        self.assertIn(f'href="/m/{self.slug}?view=1">Front</a>', html)
+        self.assertIn(f'href="/m/{self.slug}?3d=1">3D model</a>', html)
+        self.assertIn(f'href="/m/{self.slug}?pdf=1">PDF</a>', html)
+        self.assertIn('class="st rendered">rendered', html)
+        self.assertIn("1 / 7 rendered", html)
+        self.assertIn('value="render-all"', html)
+
+
 class PagesTest(Base):
     """The viewer's pages ask for what they show, and wait for it."""
 

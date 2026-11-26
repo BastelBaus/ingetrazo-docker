@@ -247,9 +247,12 @@ Sessions (`local`, `oidc`) last `VIEWER_SESSION_DAYS` (30) and end when the cont
 The users live in one SQLite file, `users.db`, on the volume `users` that both services mount (`USERS_DB`, default
 `/state/users.db`). Each user has a role, `admin` or `user`, and is switched on or off.
 
-- **Admins** manage the list at **`/admin`** (the *Users* button in the top bar): add local users (`local` mode), set
+- **Admins** manage the list at **`/admin`** (the *Admin* button in the top bar): add local users (`local` mode), set
   roles and passwords, switch users off and on, remove them. The list always keeps one active admin, and an admin
   cannot switch themself off or remove themself.
+- **Renders** (`/admin/renders`, admins): every saved view, sheet, 3D model and PDF of every model and its render
+  status (rendered, rendering now, queued, failed with the error, not rendered, outdated); *Render missing* queues
+  what is not rendered yet, of one model or all.
 - **The first admin** comes from `ADMIN_USER` (default `admin`) / `ADMIN_PASSWORD` while there is no active admin. After that the
   list decides: changing `ADMIN_PASSWORD` later does nothing; change the password at `/account` or `/admin`.
   `VIEWER_USER` / `VIEWER_PASSWORD`, the old names, still work. An existing first admin keeps its name (before:
