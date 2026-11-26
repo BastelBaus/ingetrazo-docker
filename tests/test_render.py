@@ -145,6 +145,29 @@ class RenderTest(Base):
         self.assertEqual(self.app.tools(), ["open_document", "export_file"])
         self.assertTrue(self.r.state(self.r.index(self.slug), "glb").get("file"))
 
+    def test_glb_asks_for_the_layers(self):
+        self.r.request(self.slug, "glb")
+        self.drain()
+        exports = [a for t, a in self.app.calls if t == "export_file"]
+        self.assertEqual(len(exports), 1)
+        self.assertIs(exports[0].get("layers"), True)
+
+    def test_glb_from_an_ingetrazo_without_layers(self):
+        real = self.app.call
+
+        def old_app(tool, args=None):
+            if tool == "export_file" and (args or {}).get("layers"):
+                self.app.calls.append((tool, args))
+                return {"ok": False, "error": "_tool_export_file() got an "
+                                              "unexpected keyword argument 'layers'"}
+            return real(tool, args)
+        self.app.call = old_app
+        self.r.request(self.slug, "glb")
+        self.drain()
+        exports = [a for t, a in self.app.calls if t == "export_file"]
+        self.assertEqual([a.get("layers") for a in exports], [True, None])
+        self.assertTrue(self.r.state(self.r.index(self.slug), "glb").get("file"))
+
     def test_a_changed_file_gets_a_new_rev_and_keeps_the_old_pictures(self):
         self.r.request(self.slug, "sheet:1")
         self.drain()
