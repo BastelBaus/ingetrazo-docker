@@ -8,6 +8,9 @@ When the GLB carries IngeTrazo's layers (``export_file(layers=True)``,
 ingelibre/ingetrazo#1684: ``extras.ingetrazo_layer`` on every node and
 ``asset.extras.ingetrazo_layers``), a Layers panel switches them, and a
 saved view shows its own layers (its ``hidden_layers``) with its camera.
+The panel shows the layers in their folders, as a tree like IngeTrazo's
+Layers panel (the listing reads the folders, render.py ``_layer_tree``);
+a folder's box switches every layer inside it.
 
 three.js is not in this repo: the Dockerfile fetches a pinned release
 (checksummed) into ``viewer/static/three/``, and server.py serves it under
@@ -38,6 +41,14 @@ box-shadow:0 2px 8px rgba(0,0,0,.12);min-width:160px}
 .stage .layers .sw{width:10px;height:10px;border-radius:2px;border:1px solid rgba(0,0,0,.25);flex:none}
 .stage .layers .all{display:flex;gap:6px;margin-bottom:6px}
 .stage .layers .all button{font:inherit;font-size:12px;cursor:pointer}
+.stage .layers details{margin:0}
+.stage .layers details>summary{list-style:none;display:flex;align-items:center;gap:4px;cursor:pointer}
+.stage .layers details>summary::-webkit-details-marker{display:none}
+.stage .layers details>summary::before{content:'▸';width:10px;flex:none;color:#6b6b66;font-size:11px}
+.stage .layers details[open]>summary::before{content:'▾'}
+.stage .layers details>summary .fname{flex:1;font-weight:600;white-space:nowrap}
+.stage .layers .kids{padding-left:16px}
+.stage .layers .leaf{padding-left:14px}
 @media (max-width:820px){.stage .canvas{height:70vh}.stage .hint{display:none}}
 """
 
@@ -206,6 +217,13 @@ function applyLayers() {
   panel.querySelectorAll('input[data-layer]').forEach((b) => {
     b.checked = shown.has(b.dataset.layer);
   });
+  // A folder's box: on when all its layers are, half when some are.
+  panel.querySelectorAll('input[data-folder]').forEach((b) => {
+    const names = inFolder.get(b.dataset.folder) || [];
+    const on = names.filter((n) => shown.has(n)).length;
+    b.checked = names.length > 0 && on === names.length;
+    b.indeterminate = on > 0 && on < names.length;
+  });
   draw();
 }
 function setLayers(names) {
@@ -221,6 +239,98 @@ function viewLayers(i) {
   const hidden = new Set(c.hidden_layers);
   return layers.map((l) => l.name).filter((n) => !hidden.has(n));
 }
+// The layers' folders (data-layer-tree, from the listing): the panel shows
+// them as a tree, as IngeTrazo's Layers panel does; a folder's box switches
+// every layer inside it. Without them the layers are listed flat.
+const tree = JSON.parse(stage.dataset.layerTree || '{}');
+function folderOf(l) {
+  if (typeof l.folder === 'string') return l.folder || null;   // a GLB that names it
+  return (tree.layers && tree.layers[l.name]) || null;
+}
+function layerRow(l) {
+  const row = document.createElement('label');
+  row.className = 'leaf';
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.dataset.layer = l.name;
+  box.addEventListener('change', () => {
+    if (box.checked) shown.add(l.name); else shown.delete(l.name);
+    applyLayers();
+  });
+  const sw = document.createElement('span');
+  sw.className = 'sw';
+  const c = (l.color || [1, 1, 1]).map((v) => Math.round(255 * v));
+  sw.style.background = `rgb(${c[0]},${c[1]},${c[2]})`;
+  const name = document.createElement('span');
+  name.textContent = l.name;
+  row.append(box, sw, name);
+  return row;
+}
+// The layers in a folder and every folder inside it.
+const inFolder = new Map();
+function folderRow(f, kids, below) {
+  const det = document.createElement('details');
+  det.open = true;
+  const sum = document.createElement('summary');
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.dataset.folder = f;
+  box.setAttribute('aria-label', f);
+  // The box switches the folder's layers; the name folds it.
+  box.addEventListener('click', (e) => e.stopPropagation());
+  box.addEventListener('change', () => {
+    for (const n of inFolder.get(f) || []) { if (box.checked) shown.add(n); else shown.delete(n); }
+    applyLayers();
+  });
+  const name = document.createElement('span');
+  name.className = 'fname';
+  name.textContent = f;
+  sum.append(box, name);
+  det.appendChild(sum);
+  const inner = document.createElement('div');
+  inner.className = 'kids';
+  for (const k of kids) inner.appendChild(k);
+  det.appendChild(inner);
+  inFolder.set(f, below);
+  return det;
+}
+function buildTree() {
+  // Folders as the document lists them, each with its parent; a folder a
+  // layer names that is not listed goes to the top.
+  const folders = [];
+  const parent = new Map();
+  for (const f of tree.folders || []) {
+    if (!f || !f.name || parent.has(f.name)) continue;
+    folders.push(f.name);
+    parent.set(f.name, f.parent || null);
+  }
+  for (const l of layers) {
+    const f = folderOf(l);
+    if (f && !parent.has(f)) { folders.push(f); parent.set(f, null); }
+  }
+  for (const f of folders) {                  // a parent that is not there, or a loop
+    let up = parent.get(f), seen = new Set([f]);
+    while (up && !seen.has(up) && parent.has(up)) { seen.add(up); up = parent.get(up); }
+    if (up && (seen.has(up) || !parent.has(up))) parent.set(f, null);
+  }
+  const build = (at) => {
+    // Folders first, then the layers, as IngeTrazo ranks them.
+    const out = [], names = [];
+    for (const f of folders) {
+      if (parent.get(f) !== at) continue;
+      const [kids, below] = build(f);
+      out.push(folderRow(f, kids, below));
+      names.push(...below);
+    }
+    for (const l of layers) {
+      if (folderOf(l) !== at) continue;
+      out.push(layerRow(l));
+      names.push(l.name);
+    }
+    return [out, names];
+  };
+  return build(null)[0];
+}
 function buildPanel() {
   if (!layers.length) return;
   const all = document.createElement('div');
@@ -233,24 +343,7 @@ function buildPanel() {
     all.appendChild(b);
   }
   panel.appendChild(all);
-  for (const l of layers) {
-    const row = document.createElement('label');
-    const box = document.createElement('input');
-    box.type = 'checkbox';
-    box.dataset.layer = l.name;
-    box.addEventListener('change', () => {
-      if (box.checked) shown.add(l.name); else shown.delete(l.name);
-      applyLayers();
-    });
-    const sw = document.createElement('span');
-    sw.className = 'sw';
-    const c = (l.color || [1, 1, 1]).map((v) => Math.round(255 * v));
-    sw.style.background = `rgb(${c[0]},${c[1]},${c[2]})`;
-    const name = document.createElement('span');
-    name.textContent = l.name;
-    row.append(box, sw, name);
-    panel.appendChild(row);
-  }
+  for (const row of buildTree()) panel.appendChild(row);
   layerBtn.hidden = false;
 }
 layerBtn.addEventListener('click', () => {
@@ -330,16 +423,20 @@ new GLTFLoader().load(stage.dataset.glb, (gltf) => {
 """
 
 
-def view3d(glb_url: str, cameras: list, mb: float | None = None) -> str:
+def view3d(glb_url: str, cameras: list, mb: float | None = None,
+           layer_tree: dict | None = None) -> str:
     """The 3D view of a model page: the stage, its controls and its script,
-    for the model's GLB at ``glb_url`` (``mb`` big) and its saved views'
-    ``cameras`` (picked in the top bar's 3D dropdown)."""
+    for the model's GLB at ``glb_url`` (``mb`` big), its saved views'
+    ``cameras`` (picked in the top bar's 3D dropdown) and its layers'
+    folders (``layer_tree``, render.py ``_layer_tree``) for the Layers
+    panel's tree."""
     importmap = json.dumps({"imports": {
         "three": "/static/three/three.module.min.js",
         "three/addons/": "/static/three/addons/"}})
     return (f'<style>{CSS}</style>'
             f'<figure class="one stage" id="stage" data-glb="{escape(glb_url)}" '
-            f'data-cameras="{escape(json.dumps(cameras))}">'
+            f'data-cameras="{escape(json.dumps(cameras))}" '
+            f'data-layer-tree="{escape(json.dumps(layer_tree or {}))}">'
             '<div class="canvas"><div class="status"></div>'
             '<div class="layers" hidden aria-label="Layers"></div></div>'
             '<figcaption><strong>3D</strong>'

@@ -43,7 +43,11 @@ class FakeApp:
                 {"name": n, "folder": "A/B" if i else "", "print_in_all": True}
                 for i, n in enumerate(self.sheets)]}}
         if tool == "run_python":
-            if "cameras" in args["code"]:
+            if "_itz_viewer_layers" in args["code"]:
+                out = {"folders": [{"name": "Building", "parent": None},
+                                   {"name": "Walls", "parent": "Building"}],
+                       "layers": {"Layer 0": None, "Outer": "Walls", "Roof": "Building"}}
+            elif "cameras" in args["code"]:
                 out = [{"name": v, "target": [0, 0, 0], "distance": 5, "yaw": 0,
                         "pitch": 0, "fov": 45, "perspective": True} for v in self.views]
             else:
@@ -110,13 +114,16 @@ class RenderTest(Base):
         self.r._scan()
         self.drain()
         self.assertEqual(self.app.tools(), ["open_document", "list_sheets", "run_python",
-                                            "run_python", "export_pdf:png:[1]"])
+                                            "run_python", "run_python", "export_pdf:png:[1]"])
         idx = self.r.index(self.slug)
         self.assertTrue(self.r.fresh(self.slug))
         self.assertEqual([s["name"] for s in idx["sheets"]], ["Plan", "Section"])
         self.assertEqual(idx["sheets"][1]["folder"], ["A", "B"])
         self.assertEqual(idx["views"][0]["folder"], ["Outside"])
         self.assertEqual(len(idx["cameras"]), 3)
+        self.assertEqual(idx["layer_tree"]["folders"][1], {"name": "Walls", "parent": "Building"})
+        self.assertEqual(idx["layer_tree"]["layers"]["Outer"], "Walls")
+        self.assertIsNone(idx["layer_tree"]["layers"]["Layer 0"])
         self.assertEqual(set(idx["items"]), {"preview"})
         f = render.CACHE_DIR / self.slug / idx["rev"] / idx["items"]["preview"]["file"]
         self.assertTrue(f.is_file())
@@ -167,6 +174,18 @@ class RenderTest(Base):
         exports = [a for t, a in self.app.calls if t == "export_file"]
         self.assertEqual([a.get("layers") for a in exports], [True, None])
         self.assertTrue(self.r.state(self.r.index(self.slug), "glb").get("file"))
+
+    def test_layer_tree_from_an_ingetrazo_without_folders(self):
+        real = self.app.call
+
+        def old_app(tool, args=None):
+            if tool == "run_python" and "_itz_viewer_layers" in (args or {}).get("code", ""):
+                return {"ok": True, "result": {"stdout": "", "error": "ImportError"}}
+            return real(tool, args)
+        self.app.call = old_app
+        self.r.request(self.slug, "list")
+        self.drain()
+        self.assertEqual(self.r.index(self.slug)["layer_tree"], {})
 
     def test_a_changed_file_gets_a_new_rev_and_keeps_the_old_pictures(self):
         self.r.request(self.slug, "sheet:1")
@@ -399,6 +418,7 @@ class PagesTest(Base):
         html = self.server.model_page(self.slug, query={"3d": ["1"]}).decode()
         self.assertIn('id="stage"', html)
         self.assertIn("model.glb", html)
+        self.assertIn('data-layer-tree="{&quot;folders&quot;: [{&quot;name&quot;: &quot;Building&quot;', html)
 
     def test_shares_hide_models(self):
         from types import SimpleNamespace
