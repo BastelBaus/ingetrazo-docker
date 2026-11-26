@@ -607,7 +607,8 @@ def model_page(slug: str, user: User | None = None,
         st = renderer.state(idx, "glb")
         if st.get("file"):
             content += view3d(_file_url(slug, idx["rev"], st["file"]),
-                              idx.get("cameras") or [], st.get("mb"))
+                              idx.get("cameras") or [], st.get("mb"),
+                              idx.get("layer_tree") or {})
         elif st.get("note"):
             content += f'<p class="empty">{escape(st["note"])}</p>'
         elif renderer.due(idx, "glb"):
