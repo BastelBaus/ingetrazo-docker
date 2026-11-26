@@ -90,7 +90,7 @@ WORKERS = _workers()
 
 #: Bumped when index.json changes shape: a model listed by an older viewer
 #: is listed again, even though its file is unchanged.
-INDEX_FORMAT = 4
+INDEX_FORMAT = 5
 
 NOW, NEXT, PREVIEW, BACKGROUND, LAST = 0, 1, 2, 3, 4
 
@@ -169,6 +169,22 @@ def _itz_viewer_cameras():
     print({_MARK!r} + json.dumps(out, ensure_ascii=False))
 _itz_viewer_cameras()
 del _itz_viewer_cameras
+"""
+
+#: Read-only: the layers' tree as the Layers panel shows it
+#: (core.layers): each folder with the folder it sits in, each layer with
+#: its folder, for the 3D view's Layers panel.
+_SCENE_LAYERS = f"""
+def _itz_viewer_layers():
+    import json
+    from core import layers as L
+    folders = [{{"name": f, "parent": L.folder_parent(scene, f)}}
+               for f in L.folders_of(scene)]
+    out = {{"folders": folders,
+           "layers": {{ly.name: getattr(ly, "folder", None) for ly in scene.layers}}}}
+    print({_MARK!r} + json.dumps(out, ensure_ascii=False))
+_itz_viewer_layers()
+del _itz_viewer_layers
 """
 
 
@@ -564,6 +580,8 @@ class Renderer:
             idx["views"] = [{"name": v, "folder": paths.get(v, [])} for v in views]
             if GLB_MAX_MB > 0 and views:
                 idx["cameras"] = self._view_cameras()
+            if GLB_MAX_MB > 0:
+                idx["layer_tree"] = self._layer_tree()
         except Exception as exc:
             idx["errors"].append(str(exc))
             log(f"viewer: {m.name}: {exc}")
@@ -616,6 +634,30 @@ class Renderer:
         except (RuntimeError, ValueError, AttributeError):
             pass
         return []
+
+    def _layer_tree(self) -> dict:
+        """The layers' folders (``{"folders": [{"name", "parent"}],
+        "layers": {layer: folder}}``, read-only); empty if they cannot be
+        read (an IngeTrazo without layer folders: the 3D view lists the
+        layers flat)."""
+        try:
+            reply = self._call("run_python", {"code": _SCENE_LAYERS})
+            if not reply.get("error"):
+                for line in (reply.get("stdout") or "").splitlines():
+                    if line.startswith(_MARK):
+                        got = json.loads(line[len(_MARK):])
+                        if (isinstance(got, dict) and isinstance(got.get("folders"), list)
+                                and isinstance(got.get("layers"), dict)):
+                            return {"folders": [
+                                        {"name": str(f["name"]),
+                                         "parent": str(f["parent"]) if f.get("parent") else None}
+                                        for f in got["folders"]
+                                        if isinstance(f, dict) and f.get("name")],
+                                    "layers": {str(k): (str(v) if v else None)
+                                               for k, v in got["layers"].items()}}
+        except (RuntimeError, ValueError, AttributeError, KeyError, TypeError):
+            pass
+        return {}
 
     def _sheet_list(self, info: dict) -> list[dict]:
         """Every sheet in document order, with its folder path (a list of
