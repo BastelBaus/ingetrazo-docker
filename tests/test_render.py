@@ -278,7 +278,7 @@ class PagesTest(Base):
         # The cameras sit in their saved views' folders.
         self.assertIn('data-p="[&quot;Outside&quot;]"', html)
         self.assertIn('class="dd-mode"', html)                 # list / tree switch
-        self.assertIn('data-nav="list"', html)
+        self.assertIn('data-nav="tree"', html)                 # tree by default
 
     def test_3d_dropdown_marks_the_camera(self):
         self.r.request(self.slug, "list")

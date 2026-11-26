@@ -218,14 +218,17 @@ def act(auth, user, form: dict) -> tuple[str, str]:
                 users.set_shares(name, None)
                 return f"{name} has the default folders again.", ""
             chosen = []
+            drop = set(form.get("del", []))       # a pattern's Delete button
             for key, vals in form.items():
-                if key.startswith("s:") and vals[0] in share_mod.ACCESS:
+                if key.startswith("s:") and vals[0] in share_mod.ACCESS and key[2:] not in drop:
                     chosen.append({"path": key[2:] or share_mod.ALL, "access": vals[0]})
             try:
                 chosen += share_mod.parse(get("rules"))
             except ValueError as exc:
                 raise UserError(f"in the new lines: {exc}") from None
             users.set_shares(name, chosen)
+            if drop:
+                return f"Pattern {', '.join(sorted(drop))} removed; folders of {name} saved.", ""
             return f"Folders of {name} saved.", ""
         if action == "delete":
             if me:
@@ -293,13 +296,15 @@ def shares_page(auth, user, name: str, note: str = "", error: str = "",
     paths += [p for p in current if p not in paths and not share_mod.is_pattern(p)]
     patterns = [p for p in current if share_mod.is_pattern(p)]
 
-    def select(path: str, label: str) -> str:
+    def select(path: str, label: str, pattern: bool = False) -> str:
         here = current.get(path, "")
+        # A pattern has no "–" (nothing set): its Delete button removes it.
         opts = "".join(f'<option value="{v}" title="{escape(ACCESS_TIPS[v])}"'
                        f'{" selected" if v == here else ""}>{escape(t)}</option>'
-                       for v, t in ACCESS_NAMES.items())
+                       for v, t in ACCESS_NAMES.items() if v or not pattern)
+        tip = "What this share gives" if pattern else "What this share gives; “–” removes it"
         return (f'<select name="s:{escape(path)}" aria-label="Access to {escape(label)}" '
-                'title="What this share gives; “–” removes it">' + opts + '</select>')
+                f'title="{tip}">' + opts + '</select>')
 
     rows = []
     for path in paths:
@@ -317,7 +322,11 @@ def shares_page(auth, user, name: str, note: str = "", error: str = "",
                     f'<td class="muted">{escape(ACCESS_NAMES[got])}</td></tr>')
     pattern_rows = "".join(
         f'<tr><td title="A pattern: it covers every folder and model it matches">'
-        f'<code>{escape(p)}</code></td><td>{select(p, p)}</td></tr>' for p in patterns)
+        f'<code>{escape(p)}</code></td><td>{select(p, p, pattern=True)}</td>'
+        f'<td><button type="submit" name="del" value="{escape(p)}" '
+        f'aria-label="Delete the pattern {escape(p)}" '
+        f'title="Remove this pattern (the other changes on this page are saved too)">'
+        f'Delete</button></td></tr>' for p in patterns)
     csrf = auth.sessions.csrf(user.name)
     body = (_messages(note, error)
             + f'<p>What <strong>{escape(acc.name)}</strong> may see (and, through MCP, write). '
@@ -339,7 +348,7 @@ def shares_page(auth, user, name: str, note: str = "", error: str = "",
             'pattern and the model folder\'s mode">Result</th></tr></thead><tbody>'
             + "".join(rows) + '</tbody></table>'
             + ('<h2 title="Shares that match many folders or models at once">Patterns</h2>'
-               '<table><thead><tr><th>Pattern</th><th>Share</th></tr></thead><tbody>'
+               '<table><thead><tr><th>Pattern</th><th>Share</th><th></th></tr></thead><tbody>'
                + pattern_rows + '</tbody></table>' if patterns else "")
             + '<div class="add" style="margin-top:12px">'
             '<label for="rules">More shares, one per line: <code>folder-or-pattern:access</code> '
