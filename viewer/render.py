@@ -90,7 +90,7 @@ WORKERS = _workers()
 
 #: Bumped when index.json changes shape: a model listed by an older viewer
 #: is listed again, even though its file is unchanged.
-INDEX_FORMAT = 3
+INDEX_FORMAT = 4
 
 NOW, NEXT, PREVIEW, BACKGROUND, LAST = 0, 1, 2, 3, 4
 
@@ -163,7 +163,9 @@ def _itz_viewer_cameras():
         out.append({{"name": v.name, "target": [float(c) for c in v.target],
                     "distance": float(v.distance), "yaw": float(v.yaw),
                     "pitch": float(v.pitch), "fov": float(v.fov_deg),
-                    "perspective": bool(v.perspective)}})
+                    "perspective": bool(v.perspective),
+                    "hidden_layers": [str(n) for n in
+                                      getattr(v, "hidden_layers", None) or ()]}})
     print({_MARK!r} + json.dumps(out, ensure_ascii=False))
 _itz_viewer_cameras()
 del _itz_viewer_cameras
@@ -772,8 +774,17 @@ class Renderer:
     def _render_glb(self, glb: Path) -> dict:
         """``model.glb`` for the 3D view. A file over ``VIEWER_GLB_MAX_MB``
         is deleted and noted, not counted as an error: it would not get any
-        smaller by trying again."""
-        self._call("export_file", {"path": str(glb)})
+        smaller by trying again.
+
+        With an IngeTrazo that knows ``layers`` (ingelibre/ingetrazo#1684),
+        the file carries the layers, hidden ones too, so the 3D view can
+        switch them; an older one writes it without them."""
+        try:
+            self._call("export_file", {"path": str(glb), "layers": True})
+        except RuntimeError as exc:
+            if "layers" not in str(exc):
+                raise
+            self._call("export_file", {"path": str(glb)})
         size = glb.stat().st_size if glb.is_file() else 0
         if not size:
             raise RuntimeError("nothing was written")
