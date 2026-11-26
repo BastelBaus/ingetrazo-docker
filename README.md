@@ -120,6 +120,7 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `VIEWER_GUEST` | `false` | `local` / `oidc`: a *Log in as guest* button on the login page (see [Users](#users)) |
 | `VIEWER_PASSWORD` | – | `local`: the password (user `VIEWER_USER`); login page for browsers, Basic auth for scripts |
 | `VIEWER_PRERENDER` | `previews` | What the viewer renders before anyone looks: `previews`, `none` or `all` (see [Rendering on demand](#rendering-on-demand)) |
+| `VIEWER_WORKERS` | `1` | How many IngeTrazos render side by side, 1–16 (see [Rendering on demand](#rendering-on-demand)) |
 | `VIEWER_TITLE` | `IngeTrazo-docker` | The headline (overview, login page, browser tab); admins can change it at `/admin` → *Title* |
 | `VIEWER_SHEET_DPI` | `120` | Sheet image resolution |
 | `VIEWER_NAV_MODE` | `list` | How the View / 3D / Sheet dropdowns show folders by default: `list` (all levels) or `tree` (one level at a time); each user can switch (kept in their settings) |
@@ -206,7 +207,12 @@ takes a while. So the viewer renders what someone looks at, keeps it, and does t
   renders what is opened; until then the page shows the previous picture, marked "updating…". The sheets and
   views opened in the last `VIEWER_RECENT_MINUTES` (30) are rendered again first.
 - **One queue** does it all, most urgent first: what a user waits for, then the neighbours and recently viewed,
-  then previews, then (`all`) everything else.
+  then previews, then (`all`) everything else: the saved views, then the sheets, then the 3D model, and the PDF of
+  all sheets last, once nothing else waits. A task that has started is not interrupted: a click waits for it.
+- **Render workers** (`VIEWER_WORKERS`, default 1): that many IngeTrazos take tasks from the queue side by side, so
+  a click does not wait behind a long render. Each one is a whole app (memory, a few seconds to start), and in
+  software rendering it needs CPU cores of its own: more workers than free cores only make each render slower.
+  Mesa's renderer uses several threads per app; `LP_NUM_THREADS` (e.g. cores ÷ workers) caps them.
 
 `VIEWER_PRERENDER` sets what is done before anyone looks:
 
@@ -214,7 +220,7 @@ takes a while. So the viewer renders what someone looks at, keeps it, and does t
 |---|---|
 | `previews` (default) | List each model and render its preview in the background, so the overview is ready. |
 | `none` | Nothing in the background: previews when the overview is opened, the rest when it is looked at. |
-| `all` | Everything (sheets, views, PDF, 3D model) in the background, as the viewer did before; fine for a few small models. |
+| `all` | Everything in the background: first every model's preview, then views, sheets, 3D model, and the PDFs last; fine for a few small models. |
 
 Each picture is cached by the file's modification time and size, the item, and the render settings in its file
 name (`sheet-003-120dpi.png`), so changing `VIEWER_SHEET_DPI` renders anew instead of showing an old picture.

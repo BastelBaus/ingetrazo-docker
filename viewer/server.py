@@ -39,7 +39,7 @@ from mcp_http.users import UserError
 from . import admin, avatar, site, version
 from .auth import Auth, User
 from .render import (CACHE_DIR, GLB_MAX_MB, NEXT, NOW, POLL, PRERENDER, PREVIEW,
-                     WITH_PDF, Renderer)
+                     WITH_PDF, WORKERS, Renderer)
 from .view3d import THREE_DIR, view3d
 
 renderer: Renderer
@@ -1141,7 +1141,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _health(self):
         stale = time.monotonic() - renderer.heartbeat
-        if not renderer.app.alive():
+        if not renderer.alive():
             status, body = 503, {"status": "ingetrazo not running"}
         elif renderer.rendering is None and stale > max(60.0, POLL * 20):
             status, body = 503, {"status": "render loop stalled"}
@@ -1154,16 +1154,19 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     global renderer, auth
     auth = Auth()                    # a wrong setting stops here, before IngeTrazo
-    app = App()
-    renderer = Renderer(app)
+    # One IngeTrazo per render worker, each with its own copy of the client
+    # script (its own port and child process).
+    apps = [App() if n == 1 else App(f"ingetrazo_mcp_w{n}") for n in range(1, WORKERS + 1)]
+    renderer = Renderer(apps)
     port = int(os.environ.get("VIEWER_PORT", 8080))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, name="http", daemon=True).start()
     log(f"viewer on :{port} (auth: {auth.describe()}); cache {CACHE_DIR}; "
-        f"prerender {PRERENDER}; model folders: "
+        f"prerender {PRERENDER}; render workers: {WORKERS}; model folders: "
         + "; ".join(f.describe() for f in folders.FOLDERS))
-    app.start(None, allow_save=False)
+    for app in apps:
+        app.start(None, allow_save=False)
     renderer.run()
 
 

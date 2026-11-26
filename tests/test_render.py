@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -26,12 +27,15 @@ class FakeApp:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
+        self.delay = 0.0
         self.sheets = ["Plan", "Section"]
         self.views = ["Front", "Back", "Top"]
 
     def call(self, tool: str, args: dict | None = None) -> dict:
         args = args or {}
         self.calls.append((tool, args))
+        if self.delay and tool in ("export_view", "export_pdf"):
+            time.sleep(self.delay)
         if tool == "open_document":
             return {"ok": True, "result": {"sheets": self.sheets, "views": self.views}}
         if tool == "list_sheets":
@@ -176,6 +180,69 @@ class RenderTest(Base):
                                              "view:1", "view:2", "view:3", "pdf"})
         self.r._scan()
         self.assertTrue(self.r.queue.empty())
+
+    def test_prerender_all_order(self):
+        """Every model's preview first, then views, sheets, 3D, and the PDF
+        last of all."""
+        other = self.data / "p" / "barn.igz"
+        other.write_bytes(b"barn")
+        os.utime(other, (time.time() - 60, time.time() - 60))
+        self.r._refresh_models()
+        render.PRERENDER = "all"
+        self.r._scan()
+        order = []
+        while not self.r.queue.empty():
+            slug, item, prio = self.r.queue.pop(self.r._open[0] if self.r._open else None)
+            self.r._task(slug, item, prio)
+            if item not in ("all", "list"):
+                order.append((slug, item))
+        items = [i for _, i in order]
+        self.assertEqual(items[:2], ["preview", "preview"])          # both models
+        self.assertEqual(len({s for s, _ in order[:2]}), 2)
+        per_model = [i for s, i in order if s == self.slug]
+        self.assertEqual(per_model, ["preview", "view:1", "view:2", "view:3",
+                                     "sheet:1", "sheet:2", "glb", "pdf"])
+        self.assertEqual(items[-2:], ["pdf", "pdf"])                  # PDFs after all else
+
+    def test_two_workers_render_side_by_side(self):
+        apps = [FakeApp(), FakeApp()]
+        for a in apps:
+            a.delay = 0.05
+        r = render.Renderer(apps)
+        r.request(self.slug, "list")
+        for i in range(1, 4):
+            r.request(self.slug, f"view:{i}")
+        for i in range(1, 3):
+            r.request(self.slug, f"sheet:{i}")
+        for w in r.workers:
+            threading.Thread(target=r._work, args=(w,), daemon=True).start()
+        deadline = time.time() + 10
+        while (not r.queue.empty() or r.rendering) and time.time() < deadline:
+            time.sleep(0.02)
+        time.sleep(0.1)
+        idx = r.index(self.slug)
+        self.assertEqual(set(idx["items"]), {"view:1", "view:2", "view:3",
+                                             "sheet:1", "sheet:2"})   # none lost
+        self.assertTrue(all(st.get("file") for st in idx["items"].values()))
+        self.assertTrue(all(a.calls for a in apps))                   # both worked
+        listings = sum(1 for a in apps for t, _ in a.calls if t == "list_sheets")
+        self.assertEqual(listings, 1)                                 # listed once
+
+    def test_workers_setting(self):
+        saved = os.environ.get("VIEWER_WORKERS")
+        try:
+            for raw, want in (("", 1), ("3", 3)):
+                os.environ["VIEWER_WORKERS"] = raw
+                self.assertEqual(render._workers(), want)
+            for raw in ("0", "x", "17"):
+                os.environ["VIEWER_WORKERS"] = raw
+                with self.assertRaises(SystemExit):
+                    render._workers()
+        finally:
+            if saved is None:
+                os.environ.pop("VIEWER_WORKERS", None)
+            else:
+                os.environ["VIEWER_WORKERS"] = saved
 
     def test_removed_model_drops_its_cache(self):
         self.r._scan()

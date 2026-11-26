@@ -2,15 +2,19 @@
 """Renders the models of the model folders, on demand, and keeps what it
 rendered.
 
-A read-only headless IngeTrazo (no --allow-save) does the work, one task
-at a time, from one queue with priorities:
+Read-only headless IngeTrazos (no --allow-save) do the work:
+``VIEWER_WORKERS`` of them (default 1), each one task at a time, all from
+one queue with priorities:
 
 1. ``NOW``: what a user is waiting for: the model's listing, the sheet or
    view on screen, the 3D model, the PDF they asked for;
 2. ``NEXT``: the neighbours of what is on screen (prev/next), and the items
    viewed in the last ``VIEWER_RECENT_MINUTES`` after their model changed;
 3. ``PREVIEW``: one small preview per model for the overview;
-4. ``BACKGROUND``: everything else, with ``VIEWER_PRERENDER=all``.
+4. ``BACKGROUND``: everything else, with ``VIEWER_PRERENDER=all``: the
+   saved views first, then the sheets, then the 3D model;
+5. ``LAST``: with ``VIEWER_PRERENDER=all``, the PDF of all sheets (one long
+   call that nothing can interrupt), once nothing else is waiting.
 
 Per model, a **listing** (open the file, read its sheets, saved views and
 their folders, and the views' cameras: cheap) goes to
@@ -68,11 +72,27 @@ if PRERENDER not in ("all", "previews", "none"):
     raise SystemExit(f"VIEWER_PRERENDER must be all, previews or none, not {PRERENDER!r}")
 RECENT = float(os.environ.get("VIEWER_RECENT_MINUTES", 30)) * 60
 
+
+def _workers() -> int:
+    raw = os.environ.get("VIEWER_WORKERS", "").strip() or "1"
+    try:
+        n = int(raw)
+    except ValueError:
+        raise SystemExit(f"VIEWER_WORKERS must be a whole number, not {raw!r}") from None
+    if not 1 <= n <= 16:
+        raise SystemExit(f"VIEWER_WORKERS must be between 1 and 16, not {n}")
+    return n
+
+
+#: How many IngeTrazos render side by side; each is a whole app (memory,
+#: a few seconds to start) and, in software rendering, wants CPU cores.
+WORKERS = _workers()
+
 #: Bumped when index.json changes shape: a model listed by an older viewer
 #: is listed again, even though its file is unchanged.
 INDEX_FORMAT = 3
 
-NOW, NEXT, PREVIEW, BACKGROUND = 0, 1, 2, 3
+NOW, NEXT, PREVIEW, BACKGROUND, LAST = 0, 1, 2, 3, 4
 
 
 def slug_of(model: Path) -> str:
@@ -160,6 +180,16 @@ class Model:
 
 
 @dataclass
+class _Worker:
+    """One render thread and the IngeTrazo it drives."""
+    n: int
+    app: object
+    open: tuple[str, str] | None = None     # (slug, rev) open in its app
+    dirty: bool = False                     # a render changed the view
+    rendering: tuple[str, str] | None = None
+
+
+@dataclass
 class _Task:
     priority: int
     seq: int
@@ -213,21 +243,59 @@ class RenderQueue:
 
 
 class Renderer:
-    def __init__(self, app: App) -> None:
-        self.app = app
+    def __init__(self, apps: App | list[App]) -> None:
+        self.apps = list(apps) if isinstance(apps, (list, tuple)) else [apps]
+        self.app = self.apps[0]
+        self.workers = [_Worker(i + 1, a) for i, a in enumerate(self.apps)]
+        self._local = threading.local()          # the worker of this thread
+        self._write = threading.RLock()          # index.json read-modify-write
+        self._listing: dict[str, threading.Lock] = collections.defaultdict(threading.Lock)
         self.queue = RenderQueue()
         self.changed = threading.Condition()
         self.generation = 0          # bumped on every event
         self.events: collections.deque = collections.deque(maxlen=256)
         self.heartbeat = time.monotonic()
-        self.rendering: tuple[str, str] | None = None
         self._models: dict[str, Model] = {}
         self._index: dict[str, dict] = {}
         self._index_lock = threading.Lock()
         self._recent: dict[tuple[str, str, str], float] = {}
-        self._open: tuple[str, str] | None = None     # (slug, rev) open in the app
-        self._dirty = False                            # a render changed the view
         self._refresh_models()
+
+    # ---- the workers ---------------------------------------------------------
+    @property
+    def _w(self) -> _Worker:
+        """The worker of the calling thread (the first one elsewhere)."""
+        return getattr(self._local, "w", None) or self.workers[0]
+
+    @property
+    def _open(self) -> tuple[str, str] | None:
+        return self._w.open
+
+    @_open.setter
+    def _open(self, value: tuple[str, str] | None) -> None:
+        self._w.open = value
+
+    @property
+    def _dirty(self) -> bool:
+        return self._w.dirty
+
+    @_dirty.setter
+    def _dirty(self, value: bool) -> None:
+        self._w.dirty = value
+
+    @property
+    def rendering(self) -> tuple[str, str] | None:
+        """What a worker renders now (the first busy one), or None."""
+        for w in self.workers:
+            if w.rendering:
+                return w.rendering
+        return None
+
+    def busy_slugs(self) -> set[str]:
+        return {w.rendering[0] for w in self.workers if w.rendering}
+
+    def alive(self) -> bool:
+        return all(a.alive() for a in self.apps)
 
     # ---- the models --------------------------------------------------------
     def _refresh_models(self) -> bool:
@@ -246,14 +314,14 @@ class Renderer:
 
     def models(self) -> list[dict]:
         """For the overview: every model, folder by folder."""
-        current = self.rendering[0] if self.rendering else None
+        busy = self.busy_slugs()
         out = []
         for m in list(self._models.values()):
             out.append({"slug": m.slug, "name": m.name, "rel": m.rel,
                         "folder": m.folder.name, "mode": m.folder.mode,
                         "index": self.index(m.slug) or {},
                         "fresh": self.fresh(m.slug),
-                        "rendering": current == m.slug})
+                        "rendering": m.slug in busy})
         return out
 
     # ---- the listings --------------------------------------------------------
@@ -274,13 +342,27 @@ class Renderer:
         return idx
 
     def _save(self, idx: dict) -> None:
-        base = CACHE_DIR / idx["slug"]
-        base.mkdir(parents=True, exist_ok=True)
-        tmp = base / "index.json.part"
-        tmp.write_text(json.dumps(idx, indent=1, ensure_ascii=False), "utf-8")
-        tmp.replace(base / "index.json")
-        with self._index_lock:
-            self._index[idx["slug"]] = copy.deepcopy(idx)
+        with self._write:
+            base = CACHE_DIR / idx["slug"]
+            base.mkdir(parents=True, exist_ok=True)
+            tmp = base / "index.json.part"
+            tmp.write_text(json.dumps(idx, indent=1, ensure_ascii=False), "utf-8")
+            tmp.replace(base / "index.json")
+            with self._index_lock:
+                self._index[idx["slug"]] = copy.deepcopy(idx)
+
+    def _set_item(self, slug: str, rev: str, item: str, state: dict) -> bool:
+        """One item's state into the model's current listing; False (and
+        nothing saved) when a newer listing replaced ``rev`` meanwhile.
+        Read and written under one lock: workers finish items of the same
+        model at the same time."""
+        with self._write:
+            idx = copy.deepcopy(self.index(slug))
+            if idx is None or idx.get("rev") != rev:
+                return False
+            idx.setdefault("items", {})[item] = state
+            self._save(idx)
+            return True
 
     def fresh(self, slug: str) -> bool:
         """The listing describes the file as it is now (a failed listing
@@ -336,7 +418,9 @@ class Renderer:
     def run(self) -> None:
         """Starts the render worker, then watches the model folders."""
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        threading.Thread(target=self._work, name="render", daemon=True).start()
+        for w in self.workers:
+            threading.Thread(target=self._work, args=(w,), daemon=True,
+                             name="render" if len(self.workers) == 1 else f"render-{w.n}").start()
         while True:
             self.heartbeat = time.monotonic()
             try:
@@ -353,9 +437,14 @@ class Renderer:
             if PRERENDER == "none":
                 continue
             if not self.fresh(m.slug) or idx is None:
-                self.queue.put(m.slug, "all" if PRERENDER == "all" else "preview",
-                               BACKGROUND if PRERENDER == "all" else PREVIEW)
+                # The preview first (it lists the model), for every model,
+                # before the rest of any of them.
+                self.queue.put(m.slug, "preview", PREVIEW)
+                if PRERENDER == "all":
+                    self.queue.put(m.slug, "all", BACKGROUND)
             elif PRERENDER == "all":
+                if self.due(idx, "preview"):
+                    self.queue.put(m.slug, "preview", PREVIEW)
                 if any(self.due(idx, i) for i in self._items(idx)):
                     self.queue.put(m.slug, "all", BACKGROUND)
             elif self.due(idx, "preview"):
@@ -368,30 +457,39 @@ class Renderer:
                     self._index.pop(d.name, None)
                 self._notify("removed", slug=d.name)
 
-    def _work(self) -> None:
+    def _work(self, worker: _Worker | None = None) -> None:
+        w = worker or self.workers[0]
+        self._local.w = w
         while True:
-            slug, item, priority = self.queue.pop(self._open[0] if self._open else None)
-            self.rendering = (slug, item)
+            slug, item, priority = self.queue.pop(w.open[0] if w.open else None)
+            w.rendering = (slug, item)
             self._notify("rendering", slug=slug, item=item)
             try:
                 self._task(slug, item, priority)
             except Exception as exc:                 # keep working
                 log(f"viewer: {slug} {item}: {exc!r}")
             finally:
-                self.rendering = None
-            if self.queue.empty():
+                w.rendering = None
+            if self.queue.empty() and self.rendering is None:
                 self._notify("idle")
 
     def _items(self, idx: dict) -> list[str]:
-        """Every item of a model, in the order ``all`` renders them: the 3D
-        model first, while the document is as it was saved."""
+        """Every item of a model, in the order ``all`` renders them: what
+        people open most first (the saved views), then the sheets, the 3D
+        model (it reopens the document as saved) and the PDF."""
         n_sheets, n_views = len(idx.get("sheets") or []), len(idx.get("views") or [])
-        items = ["glb"] if GLB_MAX_MB > 0 else []
-        items += ["preview"] + [f"sheet:{i}" for i in range(1, n_sheets + 1)]
-        items += [f"view:{i}" for i in range(1, n_views + 1)]
+        items = ["preview"] + [f"view:{i}" for i in range(1, n_views + 1)]
+        items += [f"sheet:{i}" for i in range(1, n_sheets + 1)]
+        if GLB_MAX_MB > 0:
+            items.append("glb")
         if WITH_PDF and n_sheets:
             items.append("pdf")
         return items
+
+    @staticmethod
+    def _background(item: str) -> int:
+        """The priority of an item that ``all`` renders unasked."""
+        return {"preview": PREVIEW, "pdf": LAST}.get(item, BACKGROUND)
 
     def _task(self, slug: str, item: str, priority: int) -> None:
         m = self._models.get(slug)
@@ -405,7 +503,9 @@ class Renderer:
             if time.time() - sig[0] / 1e9 < SETTLE:   # still being written
                 self.queue.put(slug, item, priority, delay=SETTLE)
                 return
-            self._list(m, sig)
+            with self._listing[slug]:                # one worker lists it
+                if not self.fresh(slug):
+                    self._list(m, sig)
         if item == "list":
             return
         idx = copy.deepcopy(self.index(slug))
@@ -414,21 +514,20 @@ class Renderer:
         if item == "all":
             for i in self._items(idx):
                 if self.due(idx, i):
-                    self.queue.put(slug, i, BACKGROUND)
+                    self.queue.put(slug, i, self._background(i))
             return
         if item not in self._items(idx) or not self.due(idx, item):
             return
         if idx.get("errors"):                        # the file did not open
-            idx.setdefault("items", {})[item] = {"error": "; ".join(idx["errors"]),
-                                                 "at": time.time()}
-            self._save(idx)
+            self._set_item(slug, idx["rev"], item, {"error": "; ".join(idx["errors"]),
+                                                    "at": time.time()})
             self._notify("done", slug=slug, rev=idx["rev"], item=item, ok=False)
             return
         self._render(m, idx, item)
 
     # ---- listing ---------------------------------------------------------------
     def _call(self, tool: str, args: dict | None = None) -> dict:
-        reply = self.app.call(tool, args or {})
+        reply = self._w.app.call(tool, args or {})
         if not reply.get("ok"):
             raise RuntimeError(f"{tool}: {reply.get('error')}")
         return reply.get("result") or {}
@@ -593,9 +692,11 @@ class Renderer:
         state["seconds"] = round(time.monotonic() - t0, 1)
         if not state.get("warnings"):
             state.pop("warnings", None)
-        idx.setdefault("items", {})[item] = state
-        self._save(idx)
+        if not self._set_item(m.slug, idx["rev"], item, state):
+            target.unlink(missing_ok=True)           # listed anew meanwhile
+            return
         log(f"viewer: {m.name}: {item} in {state['seconds']}s"
+            + (f" (worker {self._w.n})" if len(self.workers) > 1 else "")
             + (f": {state['error']}" if state.get("error") else ""))
         self._notify("done", slug=m.slug, rev=idx["rev"], item=item,
                      ok=not state.get("error"))
