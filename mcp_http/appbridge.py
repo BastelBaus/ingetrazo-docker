@@ -7,7 +7,9 @@ instructions, the JSON-RPC ``handle()`` and the code that starts a
 window-less IngeTrazo (``--headless``) and waits for its bridge. This module
 loads that file from the app checkout, starts the child once, and serialises
 every request to it — the bridge works one request at a time, and the HTTP
-server, the viewer and the health probe all go through this one lock.
+server, the viewer and the health probe all go through this one lock. The
+viewer may run several apps (``VIEWER_WORKERS``), each with its own child,
+port and lock.
 """
 from __future__ import annotations
 
@@ -27,13 +29,16 @@ def log(msg: str) -> None:
     print(f"[ingetrazo-docker] {msg}", file=sys.stderr, flush=True)
 
 
-def _load_stdio_server():
+def _load_stdio_server(name: str = "ingetrazo_mcp"):
+    """The app's client script as a module of its own. Each ``name`` is a
+    separate copy with its own globals (``PORT``, the child process), so
+    several apps can run side by side (the viewer's render workers)."""
     script = APP_DIR / "scripts" / "ingetrazo_mcp.py"
-    spec = importlib.util.spec_from_file_location("ingetrazo_mcp", script)
+    spec = importlib.util.spec_from_file_location(name, script)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load {script}")
     module = importlib.util.module_from_spec(spec)
-    sys.modules["ingetrazo_mcp"] = module
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     for name in ("handle", "_bridge", "_start_child", "TOOLS", "INSTRUCTIONS",
                  "HOST", "OPERATION_TIMEOUT", "DISCOVERY_TIMEOUT"):
@@ -67,10 +72,12 @@ def ai_timeout() -> float | None:
 
 
 class App:
-    """One headless IngeTrazo and the one connection to its bridge."""
+    """One headless IngeTrazo and the one connection to its bridge.
+    ``name``: the module name of its client script; give each app in a
+    process its own (see ``_load_stdio_server``)."""
 
-    def __init__(self) -> None:
-        self.mcp = _load_stdio_server()
+    def __init__(self, name: str = "ingetrazo_mcp") -> None:
+        self.mcp = _load_stdio_server(name)
         self.lock = threading.Lock()
         self.busy_since: float | None = None
         self.ready = False
