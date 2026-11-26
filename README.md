@@ -122,7 +122,7 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `VIEWER_PRERENDER` | `previews` | What the viewer renders before anyone looks: `previews`, `none` or `all` (see [Rendering on demand](#rendering-on-demand)) |
 | `VIEWER_TITLE` | `IngeTrazo-docker` | The headline (overview, login page, browser tab); admins can change it at `/admin` → *Title* |
 | `VIEWER_SHEET_DPI` | `120` | Sheet image resolution |
-| `VIEWER_NAV_MODE` | `list` | How the View / 3D / Sheet dropdowns show folders by default: `list` (all levels) or `tree` (one level at a time); each user can switch (kept in their settings) |
+| `VIEWER_NAV_MODE` | `tree` | How the View / 3D / Sheet dropdowns show folders by default: `tree` (one level at a time) or `list` (all levels); each user can switch (kept in their settings) |
 | `VIEWER_GLB_MAX_MB` | `50` | 3D view: a model whose GLB is bigger gets no 3D view (it is still rendered as sheets and views); `0` turns the 3D view off |
 | `INGETRAZO_AI_TIMEOUT` | app default (180 s) | How long one call may run before IngeTrazo answers `timed out on the UI thread`; raise it for big models on software rendering. Needs an IngeTrazo with [ingelibre/ingetrazo#1586](https://github.com/ingelibre/ingetrazo/pull/1586) |
 | `HEALTH_MAX_BUSY_SECONDS` | `900` | MCP `/healthz` turns `blocked` (503) after one call ran this long; keep it above `INGETRAZO_AI_TIMEOUT` |
@@ -257,7 +257,8 @@ The users live in one SQLite file, `users.db`, on the volume `users` that both s
   shows a user only what they may read; *write* is for saving and exporting through MCP. Admins have everything.
   A user nobody has set folders for gets `DEFAULT_SHARES` (default `*:r`: every folder, read), e.g.
   `DEFAULT_SHARES=*:none; projects/public:r; **/drafts:none`. The page explains the rules (*How folder access
-  works*), has tooltips on each choice, and *Check a path* tells which share decides for a folder or model.
+  works*), has tooltips on each choice, a *Delete* button on each pattern, and *Check a path* tells which share
+  decides for a folder or model.
 - **Web and MCP separately**: each user has two switches in the panel, *Web* (the viewer) and *MCP* (the MCP
   server). New users get *Web* only; admins keep *Web*. A user with *MCP* makes personal tokens at `/account`
   (`Authorization: Bearer itz_…`, for `MCP_AUTH=token`), or logs in on the OAuth consent page (`MCP_AUTH=oauth`)

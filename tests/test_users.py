@@ -252,9 +252,21 @@ class ViewerLoginTest(unittest.TestCase):
             {"path": "*", "access": "r"}, {"path": "**/private", "access": "none"},
             {"path": "projects/a", "access": "rw"}])
         self.assertIn("<code>**/private</code>", page)         # the patterns table
-        # "–" on a pattern removes it.
+        # A pattern has a Delete button instead of "–".
+        page = self.req("/admin/shares?name=anna", cookie=boss)[2]
+        self.assertIn('name="del" value="**/private"', page)
+        row = page[page.index('name="s:**/private"'):]
+        self.assertNotIn('<option value=""', row[:row.index("</select>")])
+        status, _, page = self.req("/admin", {
+            "action": "shares", "name": "anna", "csrf": token, "s:*": "r",
+            "s:**/private": "none", "s:projects/a": "rw", "del": "**/private"}, boss)
+        self.assertEqual(status, 200, page)
+        self.assertIn("Pattern **/private removed", page)
+        self.assertEqual(self.server.auth.users.get("anna").shares,
+                         [{"path": "*", "access": "r"}, {"path": "projects/a", "access": "rw"}])
+        # "–" (an empty access) still removes a share.
         self.req("/admin", {"action": "shares", "name": "anna", "csrf": token,
-                            "s:*": "r", "s:**/private": ""}, boss)
+                            "s:*": "r", "s:projects/a": ""}, boss)
         self.assertEqual(self.server.auth.users.get("anna").shares,
                          [{"path": "*", "access": "r"}])
         status, _, page = self.req("/admin/shares?name=anna&check=projects/x.igz", cookie=boss)
@@ -303,9 +315,21 @@ class ViewerLoginTest(unittest.TestCase):
             {"path": "*", "access": "r"}, {"path": "**/private", "access": "none"},
             {"path": "projects/a", "access": "rw"}])
         self.assertIn("<code>**/private</code>", page)         # the patterns table
-        # "–" on a pattern removes it.
+        # A pattern has a Delete button instead of "–".
+        page = self.req("/admin/shares?name=anna", cookie=boss)[2]
+        self.assertIn('name="del" value="**/private"', page)
+        row = page[page.index('name="s:**/private"'):]
+        self.assertNotIn('<option value=""', row[:row.index("</select>")])
+        status, _, page = self.req("/admin", {
+            "action": "shares", "name": "anna", "csrf": token, "s:*": "r",
+            "s:**/private": "none", "s:projects/a": "rw", "del": "**/private"}, boss)
+        self.assertEqual(status, 200, page)
+        self.assertIn("Pattern **/private removed", page)
+        self.assertEqual(self.server.auth.users.get("anna").shares,
+                         [{"path": "*", "access": "r"}, {"path": "projects/a", "access": "rw"}])
+        # "–" (an empty access) still removes a share.
         self.req("/admin", {"action": "shares", "name": "anna", "csrf": token,
-                            "s:*": "r", "s:**/private": ""}, boss)
+                            "s:*": "r", "s:projects/a": ""}, boss)
         self.assertEqual(self.server.auth.users.get("anna").shares,
                          [{"path": "*", "access": "r"}])
         status, _, page = self.req("/admin/shares?name=anna&check=projects/x.igz", cookie=boss)
@@ -335,15 +359,15 @@ class ViewerLoginTest(unittest.TestCase):
     def test_settings_follow_the_user(self):
         boss = self.login("boss", "boss-password")
         page = self.req("/account", cookie=boss)[2]
-        self.assertIn('data-nav="list"', page)
+        self.assertIn('data-nav="tree"', page)                 # tree by default
         token = self.csrf(page)
-        status, _, body = self.req("/account/settings", {"nav_mode": "tree", "csrf": token}, boss,
+        status, _, body = self.req("/account/settings", {"nav_mode": "list", "csrf": token}, boss,
                                    accept="application/json")
         self.assertEqual(status, 200, body)
-        self.assertEqual(json.loads(body)["nav_mode"], "tree")
-        self.assertIn('data-nav="tree"', self.req("/account", cookie=boss)[2])
+        self.assertEqual(json.loads(body)["nav_mode"], "list")
+        self.assertIn('data-nav="list"', self.req("/account", cookie=boss)[2])
         # Another session (another browser) gets the same.
-        self.assertIn('data-nav="tree"', self.req("/account", cookie=self.login("boss", "boss-password"))[2])
+        self.assertIn('data-nav="list"', self.req("/account", cookie=self.login("boss", "boss-password"))[2])
         status, _, _ = self.req("/account/settings", {"nav_mode": "x", "csrf": token}, boss)
         self.assertEqual(status, 400)
         status, _, _ = self.req("/account/settings", {"nav_mode": "list"}, boss)
@@ -352,7 +376,7 @@ class ViewerLoginTest(unittest.TestCase):
         status, _, page = self.req("/account", {"action": "settings", "nav_mode": "",
                                                 "edges_3d": "0", "csrf": token}, boss)
         self.assertEqual(status, 200, page)
-        self.assertIn('data-nav="list" data-edges="0"', page)
+        self.assertIn('data-nav="tree" data-edges="0"', page)
 
     def test_guest_login(self):
         from viewer import auth as auth_mod

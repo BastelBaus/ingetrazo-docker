@@ -44,10 +44,10 @@ from .view3d import THREE_DIR, view3d
 
 renderer: Renderer
 auth: Auth
-#: How the View / 3D / Sheet dropdowns show folders by default: "list"
-#: (every level at once) or "tree" (one level at a time). Each browser can
-#: switch in the dropdown.
-NAV_MODE = "tree" if os.environ.get("VIEWER_NAV_MODE", "").strip().lower() == "tree" else "list"
+#: How the View / 3D / Sheet dropdowns show folders by default: "tree"
+#: (one level at a time, the default) or "list" (every level at once). Each
+#: browser can switch in the dropdown.
+NAV_MODE = "list" if os.environ.get("VIEWER_NAV_MODE", "").strip().lower() == "list" else "tree"
 _SAFE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 CSS = """
