@@ -1,4 +1,5 @@
-# Build the image and publish it to the GitHub Container Registry.
+# Build the engine image and publish it to the GitHub Container Registry
+# as ghcr.io/<owner>/ingetrazo.
 #
 #   push to dev            -> :dev, :dev-<sha>                  (amd64)
 #   manual run on a branch -> :br-<branch>                      (amd64)
@@ -36,7 +37,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Tags and platforms
         id: plan
@@ -86,11 +87,11 @@ jobs:
           echo "repo=$(sed -n 's/^ARG INGETRAZO_REPO=//p' Dockerfile)" >> "$GITHUB_OUTPUT"
           echo "ref=$(sed -n 's/^ARG INGETRAZO_REF=//p' Dockerfile)" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
         if: contains(steps.plan.outputs.platforms, 'arm64')
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -98,19 +99,19 @@ jobs:
 
       # Only for the OCI labels and annotations; the tags come from "plan".
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ steps.plan.outputs.image }}
           labels: |
-            org.opencontainers.image.title=IngeTrazo (headless)
-            org.opencontainers.image.description=IngeTrazo headless: MCP over HTTP and a live sheet/view viewer
+            org.opencontainers.image.title=IngeTrazo engine (headless)
+            org.opencontainers.image.description=IngeTrazo headless behind an internal HTTP API, for the MCP gateway and web viewer of ingetrazo-web-viewer
             org.opencontainers.image.licenses=AGPL-3.0-or-later
             org.opencontainers.image.version=${{ steps.plan.outputs.version }}
             io.github.ingetrazo.repo=${{ steps.ref.outputs.repo }}
             io.github.ingetrazo.ref=${{ steps.ref.outputs.ref }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ steps.plan.outputs.platforms }}

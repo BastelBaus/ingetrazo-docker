@@ -24,7 +24,9 @@ Release images are built for amd64 and arm64, everything else for amd64 only (fa
 2. Open a PR into `dev`. The title follows [Conventional Commits](https://www.conventionalcommits.org):
    `feat: …`, `fix: …`, `docs: …`, `ci: …`, `chore: …`, `feat!: …` for breaking changes.
    It becomes the commit message (squash merge) and the line in the release notes.
-3. CI must pass. After the merge, *Publish* builds `:dev`.
+3. Sign off every commit (`git commit -s`). The required checks must pass (*DCO*, *smoke*, see
+   [Branch protection](#branch-protection)); then the PR may merge, also by auto-merge.
+   After the merge, *Publish* builds `:dev`.
 
 To try an unmerged branch in a container: *Actions → Publish → Run workflow* on that branch → `:br-<branch>`.
 
@@ -53,11 +55,53 @@ patch release and the back-merge PR into `dev`.
 | feature → `dev`, fix → `release/*` | Squash |
 | `release/*` → `main`, `hotfix/*` → `main`, back-merge `main` → `dev` | Merge commit |
 
+## Branch protection
+
+Nothing lands in `dev`, `release/*` or `main` without a pull request. The required checks get stricter the
+closer a branch is to a release:
+
+| Branch | Review | Required checks | Auto-merge |
+|---|---|---|---|
+| `dev` | – | *DCO*, *smoke* | allowed: merges as soon as the checks pass |
+| `release/vX.Y` | – | *DCO*, *smoke* | allowed |
+| `main` | 1 approval by a code owner; admins may bypass it | *DCO*, *smoke*, *full test* | no: a maintainer merges by hand |
+
+On all three branches, force-push and deletion are blocked. Only maintainers may create or delete tags `v*`.
+
+GitHub does not let anyone approve their own PR. So a maintainer (repository admin) may merge their own PR into
+`main` without a review, and only the review can be bypassed: the required checks still apply. PRs from anyone
+else, bots included, need the code owner's approval.
+
+The checks:
+
+- **DCO**: every commit in the PR carries a `Signed-off-by` line, or a remediation commit in the PR
+  signs it off afterwards (see [CONTRIBUTING.md](../CONTRIBUTING.md#developer-certificate-of-origin-dco)).
+  Merge commits are not checked. Takes seconds.
+- **smoke**: shellcheck, unit tests, the image built for amd64, and a short end-to-end run of an
+  engine in both modes (`tests/smoke.sh`). Takes a few minutes, so it runs on every PR.
+- **full test** (planned): the long run before a release. It runs only on PRs into `main`, i.e. release
+  and hotfix PRs. Its scope is still open. Candidates: the image for amd64 and arm64, the smoke test on both, the
+  auth, OAuth and folder smoke tests, and rendering a sample model with all its sheets and views.
+
+### Status today
+
+Not everything above is configured yet:
+
+- Ruleset *DCO required (dev, main)*: PR required and *DCO* required on `dev` and `main`; force-push and
+  deletion blocked. No bypass.
+- Ruleset *main: smoke*: *smoke* required on `main`. No bypass.
+- Ruleset *main: review (admins may bypass)*: 1 code-owner approval on `main`; repository admins may
+  bypass it when they merge a PR.
+- Open: *smoke* as a required check on `dev`; rules for `release/*` and tags `v*`; the *full test*
+  workflow and making it required on `main`; `dev` as the default branch (it is still `main`).
+- Auto-merge is switched on for the repository. GitHub cannot switch it off for one branch, so on `main`
+  the required review keeps the merge in a maintainer's hands; nobody arms auto-merge on PRs into `main`.
+
 ## Repository settings this relies on
 
-- Default branch `dev`; *Automatically delete head branches* on; squash and merge commits allowed.
-- Rulesets: `main` and `release/*`: PR required, status check *smoke*, 1 approval for `main`.
-  `dev`: PR required, status check *smoke*. Tags `v*`: only maintainers may create or delete.
+- Default branch `dev`; *Automatically delete head branches* on; squash and merge commits allowed;
+  *Allow auto-merge* on.
+- The branch protection above (rulesets).
 - *Actions → General*: *Allow GitHub Actions to create and approve pull requests*.
 - Optional secret `RELEASE_TOKEN` (fine-grained token: contents + pull requests read/write):
   release and back-merge PRs opened with it get CI runs; with the default token they do not.

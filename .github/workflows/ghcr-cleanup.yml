@@ -19,10 +19,14 @@ permissions:
 jobs:
   cleanup:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [ingetrazo]
     steps:
       - uses: dataaxiom/ghcr-cleanup-action@v1
         with:
-          package: ingetrazo
+          package: ${{ matrix.package }}
           delete-tags: "dev-*,br-*"
           older-than: 30 days
           delete-untagged: true

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# End-to-end smoke test of an image: the MCP service and the viewer, on a
-# data folder with one of IngeTrazo's example models.
+# End-to-end smoke test of the engine image: one engine in each mode on a
+# data folder with one of IngeTrazo's example models. (The services that use
+# the engines are tested in ingetrazo-web-viewer, against this image.)
 #
 #   IMAGE=ingetrazo-docker:dev tests/smoke.sh
 set -euo pipefail
@@ -9,35 +10,15 @@ set -euo pipefail
 export MSYS_NO_PATHCONV=1
 
 IMAGE="${IMAGE:-ingetrazo-docker:dev}"
-MCP_PORT="${SMOKE_MCP_PORT:-18765}"
-VIEWER_PORT="${SMOKE_VIEWER_PORT:-18080}"
-TOKEN="smoke-$(date +%s)-token-0123456789"
-PASSWORD="smoke-password"
+TOKEN="smoke-$(date +%s)-engine-0123456789"
+MCP_PORT="${SMOKE_MCP_ENGINE_PORT:-18766}"
+RENDER_PORT="${SMOKE_RENDER_ENGINE_PORT:-18767}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WORK="${SMOKE_WORKDIR:-$(mktemp -d)}"
 PY="${PYTHON:-python3}"
 command -v "$PY" >/dev/null 2>&1 || PY=python
-mcp="smoke-mcp-$$"
-mcp_oauth="smoke-mcp-oauth-$$"
-OAUTH_PORT="${SMOKE_OAUTH_PORT:-18766}"
-OAUTH_PASSWORD="smoke-oauth-password"
-viewer="smoke-viewer-$$"
-# The other VIEWER_AUTH_MODEs: none, proxy, oidc (with a mock provider).
-v_none="smoke-viewer-none-$$"
-v_proxy="smoke-viewer-proxy-$$"
-v_oidc="smoke-viewer-oidc-$$"
-oidc="smoke-oidc-$$"
-net="smoke-net-$$"
-SUB="10.231.$((RANDOM % 200 + 20))"
-NONE_PORT="${SMOKE_NONE_PORT:-18081}"
-PROXY_PORT="${SMOKE_PROXY_PORT:-18082}"
-OIDC_VIEWER_PORT="${SMOKE_OIDC_VIEWER_PORT:-18083}"
-OIDC_PORT="${SMOKE_OIDC_PORT:-18084}"
-# Several model folders (MODEL_FOLDERS), MCP and viewer.
-mcp_folders="smoke-mcp-folders-$$"
-v_folders="smoke-viewer-folders-$$"
-FOLDERS_MCP_PORT="${SMOKE_FOLDERS_MCP_PORT:-18767}"
-FOLDERS_VIEWER_PORT="${SMOKE_FOLDERS_VIEWER_PORT:-18085}"
+mcp="smoke-mcp-engine-$$"
+render="smoke-render-engine-$$"
 
 # Docker Desktop on Windows (Git Bash) wants a Windows path for -v.
 host_path() { (cd "$1" && (pwd -W 2>/dev/null || pwd)); }
@@ -45,114 +26,64 @@ host_path() { (cd "$1" && (pwd -W 2>/dev/null || pwd)); }
 cleanup() {
   status=$?
   if [ $status -ne 0 ]; then
-    echo "---- logs: mcp ----";    docker logs "$mcp" 2>&1 | tail -60 || true
-    echo "---- logs: viewer ----"; docker logs "$viewer" 2>&1 | tail -60 || true
-    echo "---- logs: mcp (oauth) ----"; docker logs "$mcp_oauth" 2>&1 | tail -40 || true
-    for c in "$v_none" "$v_proxy" "$v_oidc" "$oidc" "$mcp_folders" "$v_folders"; do
-      echo "---- logs: $c ----"; docker logs "$c" 2>&1 | tail -30 || true
+    for c in "$mcp" "$render"; do
+      echo "---- logs: $c ----"; docker logs "$c" 2>&1 | tail -60 || true
     done
   fi
-  docker rm -f -v "$mcp" "$viewer" "$mcp_oauth" "$v_none" "$v_proxy" "$v_oidc" "$oidc" \
-    "$mcp_folders" "$v_folders" >/dev/null 2>&1 || true
-  docker network rm "$net" >/dev/null 2>&1 || true
+  docker rm -f -v "$mcp" "$render" >/dev/null 2>&1 || true
   exit $status
 }
 trap cleanup EXIT
 
-mkdir -p "$WORK/data" "$WORK/cache"
-chmod 777 "$WORK/data" "$WORK/cache"
+mkdir -p "$WORK/data" "$WORK/cache/smoke" "$WORK/secret"
+chmod 777 "$WORK/data" "$WORK/cache" "$WORK/cache/smoke" "$WORK/secret"
 docker run --rm --entrypoint cat "$IMAGE" /opt/ingetrazo/examples/arco-yanque.igz \
   > "$WORK/data/arco.igz"
 DATA="$(host_path "$WORK/data")"
 CACHE="$(host_path "$WORK/cache")"
+SECRET="$(host_path "$WORK/secret")"
 
 echo "== image: $IMAGE ($(docker run --rm --entrypoint cat "$IMAGE" /opt/ingetrazo/BUILD_REF))"
 
-docker run -d --name "$mcp" -p "127.0.0.1:$MCP_PORT:8765" \
-  -e MCP_AUTH=token -e MCP_TOKEN="$TOKEN" -e INGETRAZO_MODEL=arco.igz \
-  -v "$DATA:/data" "$IMAGE" mcp >/dev/null
-docker run -d --name "$viewer" -p "127.0.0.1:$VIEWER_PORT:8080" \
-  -e HEALTH_PORT=8080 -e VIEWER_PASSWORD="$PASSWORD" -e VIEWER_POLL_SECONDS=1 \
-  -v "$DATA:/data:ro" -v "$CACHE:/cache" "$IMAGE" viewer >/dev/null
-
-TESTS="$(host_path "$HERE")"
-docker network create --subnet "$SUB.0/24" "$net" >/dev/null
-docker run -d --name "$v_none" -p "127.0.0.1:$NONE_PORT:8080" \
-  -e VIEWER_AUTH_MODE=none -v "$DATA:/data:ro" "$IMAGE" viewer >/dev/null
-docker run -d --name "$v_proxy" --network "$net" --ip "$SUB.5" \
-  -p "127.0.0.1:$PROXY_PORT:8080" -e VIEWER_AUTH_MODE=proxy \
-  -e PROXY_TRUSTED_IPS="$SUB.10/32" -e PROXY_GROUPS_HEADER=X-authentik-groups \
-  -e PROXY_ADMIN_GROUP=viewer-admins -v "$DATA:/data:ro" "$IMAGE" viewer >/dev/null
-docker run -d --name "$oidc" --network "$net" --network-alias oidc \
-  -p "127.0.0.1:$OIDC_PORT:9000" -v "$TESTS:/tests:ro" --entrypoint python \
-  "$IMAGE" /tests/mock_oidc.py http://oidc:9000 9000 viewer-smoke smoke-secret >/dev/null
-docker run -d --name "$v_oidc" --network "$net" -p "127.0.0.1:$OIDC_VIEWER_PORT:8080" \
-  -e VIEWER_AUTH_MODE=oidc -e OIDC_ISSUER_URL=http://oidc:9000 \
-  -e OIDC_CLIENT_ID=viewer-smoke -e OIDC_CLIENT_SECRET=smoke-secret \
-  -e OIDC_REDIRECT_URI="http://127.0.0.1:$OIDC_VIEWER_PORT/auth/callback" \
-  -e OIDC_ALLOW_HTTP=true -e OIDC_ADMIN_GROUP=viewer-admins \
-  -v "$DATA:/data:ro" "$IMAGE" viewer >/dev/null
-
-docker run -d --name "$mcp_oauth" -p "127.0.0.1:$OAUTH_PORT:8765" \
-  -e MCP_AUTH=oauth -e PUBLIC_URL="http://127.0.0.1:$OAUTH_PORT" -e OAUTH_ALLOW_HTTP=true \
-  -e OAUTH_USER=admin -e OAUTH_PASSWORD="$OAUTH_PASSWORD" "$IMAGE" mcp >/dev/null
-
-"$PY" "$TESTS/smoke_mcp.py" "http://127.0.0.1:$MCP_PORT" "$TOKEN"
-"$PY" "$TESTS/smoke_oauth.py" "http://127.0.0.1:$OAUTH_PORT" admin "$OAUTH_PASSWORD"
-echo "== MCP_AUTH=oauth refuses to start without an https PUBLIC_URL"
-if out="$(docker run --rm -e MCP_AUTH=oauth -e PUBLIC_URL=http://example.org \
-            -e OAUTH_PASSWORD="$OAUTH_PASSWORD" "$IMAGE" mcp 2>&1)"; then
+echo "-- refuses to start without a secret, or with an unknown ENGINE_MODE"
+if out="$(docker run --rm "$IMAGE" engine 2>&1)"; then
   echo "it started"; exit 1
 fi
-echo "$out" | grep -q "PUBLIC_URL must be https"
-echo "  ok"
-"$PY" "$TESTS/smoke_viewer.py" "http://127.0.0.1:$VIEWER_PORT" viewer "$PASSWORD"
-
-# Two model folders: work (rw) and library (ro, *.bak.igz not listed).
-mkdir -p "$WORK/folders/work" "$WORK/folders/library"
-chmod 777 "$WORK/folders/work" "$WORK/folders/library"
-cp "$WORK/data/arco.igz" "$WORK/folders/library/arco.igz"
-cp "$WORK/data/arco.igz" "$WORK/folders/library/arco.bak.igz"
-F_WORK="$(host_path "$WORK/folders/work")"
-F_LIB="$(host_path "$WORK/folders/library")"
-FOLDERS="work:rw; library:ro:exclude=*.bak.igz"
-docker run -d --name "$mcp_folders" -p "127.0.0.1:$FOLDERS_MCP_PORT:8765" \
-  -e MCP_AUTH=token -e MCP_TOKEN="$TOKEN" -e INGETRAZO_MODEL=library/arco.igz \
-  -e MODEL_FOLDERS="$FOLDERS" \
-  -v "$F_WORK:/data/work" -v "$F_LIB:/data/library:ro" "$IMAGE" mcp >/dev/null
-docker run -d --name "$v_folders" -p "127.0.0.1:$FOLDERS_VIEWER_PORT:8080" \
-  -e VIEWER_AUTH_MODE=none -e VIEWER_PRERENDER=none -e VIEWER_POLL_SECONDS=1 \
-  -e MODEL_FOLDERS="$FOLDERS" \
-  -v "$F_WORK:/data/work:ro" -v "$F_LIB:/data/library:ro" "$IMAGE" viewer >/dev/null
-"$PY" "$TESTS/smoke_folders.py" "http://127.0.0.1:$FOLDERS_MCP_PORT" "$TOKEN" \
-  "http://127.0.0.1:$FOLDERS_VIEWER_PORT"
-echo "== MODEL_FOLDERS with a mistake refuses to start"
-if out="$(docker run --rm -e MODEL_FOLDERS="a:rx" -e MCP_TOKEN="$TOKEN" "$IMAGE" mcp 2>&1)"; then
+echo "$out" | grep -q "ENGINE_TOKEN"
+if out="$(docker run --rm -e ENGINE_TOKEN="$TOKEN" -e ENGINE_MODE=x "$IMAGE" engine 2>&1)"; then
   echo "it started"; exit 1
 fi
-echo "$out" | grep -q "MODEL_FOLDERS"
+echo "$out" | grep -q "ENGINE_MODE"
 echo "  ok"
 
-echo "== viewer, VIEWER_AUTH_MODE=local without a password"
-if out="$(docker run --rm "$IMAGE" viewer 2>&1)"; then
-  echo "the viewer started without a password"; exit 1
-fi
-echo "$out" | grep -q "VIEWER_AUTH_MODE=none"
-echo "  ok  refuses to start, and says how to open it on purpose"
-"$PY" "$TESTS/smoke_auth.py" none "http://127.0.0.1:$NONE_PORT"
-"$PY" "$TESTS/smoke_auth.py" proxy-untrusted "http://127.0.0.1:$PROXY_PORT"
-docker run --rm --network "$net" --ip "$SUB.10" -v "$TESTS:/tests:ro" \
-  --entrypoint python "$IMAGE" /tests/smoke_auth.py proxy-trusted "http://$SUB.5:8080"
-"$PY" "$TESTS/smoke_auth.py" oidc "http://127.0.0.1:$OIDC_VIEWER_PORT" \
-  "http://127.0.0.1:$OIDC_PORT"
-users_in() {
-  docker exec "$1" python -c 'import sqlite3; print([r[0] for r in sqlite3.connect("/state/users.db").execute("select name from users")])'
-}
-users_in "$v_oidc" | grep -q "'alice'"
-users_in "$v_proxy" | grep -q "'bob'"
-echo "  ok  oidc and proxy users recorded in the user list (users.db)"
+# The mcp engine gets its secret from ENGINE_TOKEN, the render engine makes
+# one in the shared folder (ENGINE_TOKEN_FILE), as in compose.
+docker run -d --name "$mcp" -p "127.0.0.1:$MCP_PORT:8766" \
+  -e ENGINE_MODE=mcp -e ENGINE_TOKEN="$TOKEN" -e INGETRAZO_MODEL=arco.igz \
+  -v "$DATA:/data" "$IMAGE" engine >/dev/null
+docker run -d --name "$render" -p "127.0.0.1:$RENDER_PORT:8766" \
+  -e ENGINE_TOKEN_FILE=/engine/token \
+  -v "$DATA:/data:ro" -v "$CACHE:/cache" -v "$SECRET:/engine" "$IMAGE" engine >/dev/null
+# The file is the engine user's (0600): read it from inside.
+RENDER_TOKEN=""
+for _ in $(seq 1 60); do
+  RENDER_TOKEN="$(docker exec "$render" cat /engine/token 2>/dev/null || true)"
+  [ -n "$RENDER_TOKEN" ] && break
+  sleep 1
+done
+[ "${#RENDER_TOKEN}" -ge 16 ]
+echo "  ok  the render engine made its secret"
 
-for c in "$mcp" "$viewer"; do
+"$PY" "$HERE/smoke_engine.py" "http://127.0.0.1:$MCP_PORT" "$TOKEN" \
+  "http://127.0.0.1:$RENDER_PORT" "$RENDER_TOKEN"
+test -s "$WORK/data/engine-saved.igz"
+echo "  ok  the mcp engine saved into /data"
+# (IngeTrazo names the PNGs after the sheets; only count them.)
+find "$WORK/cache" -name '*.png' | grep -q .
+find "$WORK/cache" -name '*.pdf' -size +0 | grep -q .
+echo "  ok  the render engine wrote its files into /cache"
+
+for c in "$mcp" "$render"; do
   for _ in $(seq 1 60); do
     h="$(docker inspect -f '{{.State.Health.Status}}' "$c")"
     [ "$h" = healthy ] && break
