@@ -59,6 +59,8 @@ ENGINE_TOOLS = frozenset({
 #: folder (mcp).
 WRITE_TOOLS = frozenset({"export_pdf", "export_view", "export_file",
                          "screenshot", "render_sheet", "save_document"})
+#: Without a ``path`` these answer with the image itself and write nothing.
+INLINE_TOOLS = frozenset({"render_sheet", "screenshot"})
 #: Tools whose ``path`` is read, always below the data folder.
 READ_TOOLS = frozenset({"open_document", "import_file"})
 #: Never, in either mode: the container's lifetime is Docker's.
@@ -141,8 +143,9 @@ def check(tool: str, args: dict, data_dir: Path, cache_dir: Path,
             return f"{tool}: path must lie below {data_dir}"
     elif tool in WRITE_TOOLS:
         root = cache_dir if mode == "render" else data_dir
-        if tool == "save_document" and mode == "mcp" and raw is None:
-            return None                          # saved to its own path
+        if raw is None and (tool in INLINE_TOOLS
+                            or (tool == "save_document" and mode == "mcp")):
+            return None             # nothing written: an inline image, or saved in place
         if not isinstance(raw, str) or not _inside(Path(raw), root):
             return f"{tool}: path must lie below {root}"
     return None
