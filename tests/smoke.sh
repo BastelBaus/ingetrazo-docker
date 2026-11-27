@@ -49,7 +49,7 @@ SPLIT_PORT="${SMOKE_SPLIT_PORT:-18086}"
 # Split MCP: the gateway (viewer image) + an engine in mcp mode.
 s_mcp_engine="smoke-mcp-engine-$$"
 s_gateway="smoke-mcp-gateway-$$"
-GATEWAY_PORT="${SMOKE_GATEWAY_PORT:-18767}"
+GATEWAY_PORT="${SMOKE_GATEWAY_PORT:-18768}"
 
 # Docker Desktop on Windows (Git Bash) wants a Windows path for -v.
 host_path() { (cd "$1" && (pwd -W 2>/dev/null || pwd)); }
