@@ -38,7 +38,7 @@ from mcp_http.appbridge import App, log
 from mcp_http.users import UserError
 
 from . import admin, avatar, site, version
-from .engine import RemoteApp, engine_urls
+from mcp_http.remote import RemoteApp, engine_urls
 from .auth import Auth, User
 from .render import (BACKGROUND, CACHE_DIR, GLB_MAX_MB, NEXT, NOW, POLL, PRERENDER, PREVIEW,
                      WITH_PDF, WORKERS, Renderer)
@@ -1207,7 +1207,10 @@ def main() -> None:
         f"prerender {PRERENDER}; {where}; model folders: "
         + "; ".join(f.describe() for f in folders.FOLDERS))
     for app in apps:
-        app.start(None, allow_save=False)
+        if isinstance(app, RemoteApp):
+            app.start()
+        else:
+            app.start(None, allow_save=False)
     renderer.run()
 
 

@@ -8,8 +8,10 @@
 #       (Mesa llvmpipe) and this repo's services around it: MCP over HTTP
 #       (`mcp`), the render engine for a separate viewer (`engine`), and,
 #       as before, the viewer with its own IngeTrazos (`viewer`).
-#   viewer  (--target viewer)  the live web viewer alone, without IngeTrazo
-#       or X server: it renders through engines (ENGINE_URLS).
+#   viewer  (--target viewer)  the services that hold users, rights and
+#       pages, without IngeTrazo or X server: the live web viewer (renders
+#       through engines, ENGINE_URLS) and the MCP gateway (`mcp`,
+#       MCP_ENGINE_URL).
 
 # ---- three.js for the viewer's 3D view ------------------------------------------
 # A pinned release (MIT), checked against its SHA-256, served by the viewer
@@ -58,12 +60,12 @@ ENV INGETRAZO_DOCKER_VERSION=$INGETRAZO_DOCKER_REF \
     PYTHONPATH=/opt/ingetrazo-docker
 
 # Every module imports (stdlib only, no IngeTrazo needed).
-RUN python -c "import viewer.server, viewer.engine, mcp_http.users"
+RUN python -c "import viewer.server, mcp_http.server, mcp_http.remote, mcp_http.users"
 
 USER ingetrazo
 WORKDIR /home/ingetrazo
 VOLUME ["/cache", "/state", "/users"]
-EXPOSE 8080
+EXPOSE 8765 8080
 ENV HEALTH_PORT=8080
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

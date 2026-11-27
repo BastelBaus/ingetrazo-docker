@@ -18,6 +18,12 @@ may read, and save and export only where they may write. ``run_python``
 (``ADMIN_TOOLS``) is not theirs: Python in the container reaches every
 file, which would make the folders meaningless. There is one IngeTrazo
 and one open document for every caller.
+
+In the viewer image (no IngeTrazo) this is the MCP gateway: with
+``MCP_ENGINE_URL`` every message and bridge call goes to an engine in
+``mcp`` mode (mcp_http/engine_server.py) on an internal network, and the
+users, OAuth and folder rights stay here. Without it, as in the engine
+image, IngeTrazo runs in this container.
 """
 from __future__ import annotations
 
@@ -35,6 +41,7 @@ from pathlib import Path
 from . import folders, shares
 from .appbridge import DATA_DIR, App, env_flag, initial_model, log
 from .auth import FULL, Auth, Caller
+from .remote import RemoteApp, mcp_engine_url
 
 #: Protocol revisions this server can speak; the tool and content shapes it
 #: uses are the same in all of them.
@@ -65,7 +72,7 @@ LIST_DOCUMENTS = {
     "inputSchema": {"type": "object", "properties": {}},
 }
 
-app: App
+app: App | RemoteApp
 auth: Auth
 MAX_BUSY = float(os.environ.get("HEALTH_MAX_BUSY_SECONDS") or 900)
 
@@ -330,7 +337,8 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     global app, auth
     auth = Auth()
-    app = App()
+    engine = mcp_engine_url()
+    app = RemoteApp(engine) if engine else App()
     port = int(os.environ.get("MCP_PORT", 8765))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     server.daemon_threads = True
@@ -338,10 +346,14 @@ def main() -> None:
     import threading
     threading.Thread(target=server.serve_forever, name="http",
                      daemon=True).start()
-    log(f"MCP endpoint on :{port}/mcp (auth: {auth.mode}); model folders: "
+    log(f"MCP endpoint on :{port}/mcp (auth: {auth.mode}"
+        + (f", engine {engine}" if engine else "") + "); model folders: "
         + "; ".join(f.describe() for f in folders.FOLDERS))
-    app.start(initial_model(), allow_save=env_flag("INGETRAZO_ALLOW_SAVE", True),
-              save_format=os.environ.get("INGETRAZO_SAVE_FORMAT") or None)
+    if isinstance(app, RemoteApp):
+        app.start()             # the engine opens INGETRAZO_MODEL, saves or not
+    else:
+        app.start(initial_model(), allow_save=env_flag("INGETRAZO_ALLOW_SAVE", True),
+                  save_format=os.environ.get("INGETRAZO_SAVE_FORMAT") or None)
     while True:
         time.sleep(3600)
 

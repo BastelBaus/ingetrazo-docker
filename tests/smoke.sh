@@ -46,6 +46,10 @@ s_engine="smoke-engine-$$"
 s_viewer="smoke-viewer-split-$$"
 s_net="smoke-split-net-$$"
 SPLIT_PORT="${SMOKE_SPLIT_PORT:-18086}"
+# Split MCP: the gateway (viewer image) + an engine in mcp mode.
+s_mcp_engine="smoke-mcp-engine-$$"
+s_gateway="smoke-mcp-gateway-$$"
+GATEWAY_PORT="${SMOKE_GATEWAY_PORT:-18767}"
 
 # Docker Desktop on Windows (Git Bash) wants a Windows path for -v.
 host_path() { (cd "$1" && (pwd -W 2>/dev/null || pwd)); }
@@ -57,12 +61,13 @@ cleanup() {
     echo "---- logs: viewer ----"; docker logs "$viewer" 2>&1 | tail -60 || true
     echo "---- logs: mcp (oauth) ----"; docker logs "$mcp_oauth" 2>&1 | tail -40 || true
     for c in "$v_none" "$v_proxy" "$v_oidc" "$oidc" "$mcp_folders" "$v_folders" \
-             "$s_engine" "$s_viewer"; do
+             "$s_engine" "$s_viewer" "$s_mcp_engine" "$s_gateway"; do
       echo "---- logs: $c ----"; docker logs "$c" 2>&1 | tail -30 || true
     done
   fi
   docker rm -f -v "$mcp" "$viewer" "$mcp_oauth" "$v_none" "$v_proxy" "$v_oidc" "$oidc" \
-    "$mcp_folders" "$v_folders" "$s_engine" "$s_viewer" >/dev/null 2>&1 || true
+    "$mcp_folders" "$v_folders" "$s_engine" "$s_viewer" \
+    "$s_mcp_engine" "$s_gateway" >/dev/null 2>&1 || true
   docker network rm "$net" "$s_net" >/dev/null 2>&1 || true
   exit $status
 }
@@ -217,6 +222,27 @@ assert call("list_documents", {}, token) == 200
 PY
   echo "  ok"
   health_of+=("$s_engine" "$s_viewer")
+
+  echo "== split MCP: gateway ($VIEWER_IMAGE) + engine in mcp mode"
+  echo "-- the gateway refuses to start without MCP_ENGINE_URL"
+  if out="$(docker run --rm -e MCP_TOKEN="$TOKEN" "$VIEWER_IMAGE" mcp 2>&1)"; then
+    echo "it started"; exit 1
+  fi
+  echo "$out" | grep -q "MCP_ENGINE_URL"
+  echo "  ok"
+  mkdir -p "$WORK/mcp-engine-secret"
+  chmod 777 "$WORK/mcp-engine-secret"
+  S_MSECRET="$(host_path "$WORK/mcp-engine-secret")"
+  docker run -d --name "$s_mcp_engine" --network "$s_net" --network-alias mcp-engine \
+    -e ENGINE_MODE=mcp -e HEALTH_PORT=8766 -e ENGINE_TOKEN_FILE=/engine/token \
+    -e INGETRAZO_MODEL=arco.igz -v "$DATA:/data" -v "$S_MSECRET:/engine" \
+    "$IMAGE" engine >/dev/null
+  docker run -d --name "$s_gateway" --network "$s_net" -p "127.0.0.1:$GATEWAY_PORT:8765" \
+    -e HEALTH_PORT=8765 -e MCP_AUTH=token -e MCP_TOKEN="$TOKEN" \
+    -e MCP_ENGINE_URL=http://mcp-engine:8766 -e ENGINE_TOKEN_FILE=/engine/token \
+    -v "$DATA:/data:ro" -v "$S_MSECRET:/engine:ro" "$VIEWER_IMAGE" mcp >/dev/null
+  "$PY" "$TESTS/smoke_mcp.py" "http://127.0.0.1:$GATEWAY_PORT" "$TOKEN"
+  health_of+=("$s_mcp_engine" "$s_gateway")
 fi
 
 for c in "${health_of[@]}"; do

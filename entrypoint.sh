@@ -3,8 +3,10 @@
 # Start one of the container's services. Those that run IngeTrazo do so
 # inside an in-memory X server (it needs an OpenGL context even with no
 # window on screen).
-#   mcp     MCP over HTTP (default in the engine image)
-#   engine  a render engine for a viewer in another container (internal)
+#   mcp     MCP over HTTP (default in the engine image); with
+#           MCP_ENGINE_URL a gateway to an engine, no X server needed
+#   engine  an engine for the viewer image's services (internal;
+#           ENGINE_MODE render or mcp)
 #   viewer  read-only live web viewer of sheets and views; with
 #           ENGINE_URLS it renders through engines and needs no X server
 #   shell   a shell, for debugging
@@ -21,11 +23,16 @@ case "$service" in
   *)      exec "$service" "$@" ;;
 esac
 
-# The viewer with render engines, or in the viewer image (no IngeTrazo, no
-# X server): plain Python.
-if [ "$service" = viewer ] && { [ -n "${ENGINE_URLS:-}" ] || ! command -v xvfb-run >/dev/null 2>&1; }; then
-  if [ -z "${ENGINE_URLS:-}" ]; then
-    echo "[ingetrazo-docker] this image has no IngeTrazo: set ENGINE_URLS (and ENGINE_TOKEN) to the render engines" >&2
+# The viewer and the MCP service with engines, or in the viewer image (no
+# IngeTrazo, no X server): plain Python.
+case "$service" in
+  viewer) remote="${ENGINE_URLS:-}"; var=ENGINE_URLS ;;
+  mcp)    remote="${MCP_ENGINE_URL:-}"; var=MCP_ENGINE_URL ;;
+  *)      remote=""; var="" ;;
+esac
+if [ -n "$var" ] && { [ -n "$remote" ] || ! command -v xvfb-run >/dev/null 2>&1; }; then
+  if [ -z "$remote" ]; then
+    echo "[ingetrazo-docker] this image has no IngeTrazo: set $var (and ENGINE_TOKEN or ENGINE_TOKEN_FILE) to the engine(s)" >&2
     exit 2
   fi
   exec python -m "$module" "$@"
