@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""An engine: one headless IngeTrazo behind a small internal HTTP API, for
-the services of the viewer image (which has no IngeTrazo).
+"""The engine: one headless IngeTrazo behind a small internal HTTP API, for
+the services of ingetrazo-web-viewer (https://github.com/BastelBaus/
+ingetrazo-web-viewer: the MCP gateway and the live viewer, which hold the
+users and rights and have no IngeTrazo themselves).
 
 ``ENGINE_MODE`` says whom it serves:
 
 ``render`` (default)  the viewer: only the tools it renders with, files
   written only below ``INGETRAZO_CACHE``, never ``--allow-save``.
-``mcp``  the MCP gateway (``mcp`` in the viewer image, which holds the users,
-  OAuth and folder rights): every tool but ``shutdown``, files read and
+``mcp``  the MCP gateway (which holds the users, OAuth and folder rights): every tool but ``shutdown``, files read and
   written only below the data folder; ``INGETRAZO_MODEL``,
   ``INGETRAZO_ALLOW_SAVE`` and ``INGETRAZO_SAVE_FORMAT`` as for ``mcp``.
 
@@ -22,7 +23,7 @@ the services of the viewer image (which has no IngeTrazo).
 
 This is not an MCP endpoint and not for people or AI clients: it has one
 shared secret (``ENGINE_TOKEN``), no user list and no folder rights, and
-belongs on an internal network that only the viewer image's services reach. Without
+belongs on an internal network that only those services reach. Without
 ``ENGINE_TOKEN`` the engine makes a random one in ``ENGINE_TOKEN_FILE`` (a
 volume it shares with the viewer). Whoever holds
 the token may run Python in the engine (the viewer reads scene folders and
@@ -250,6 +251,12 @@ def main() -> None:
     port = int(os.environ.get("ENGINE_PORT", 8766))
     server = Server(("0.0.0.0", port), Handler)
     threading.Thread(target=server.serve_forever, name="http", daemon=True).start()
+    build = Path(os.environ.get("INGETRAZO_APP", "/opt/ingetrazo")) / "BUILD_REF"
+    try:
+        app_ref = build.read_text(encoding="utf-8").strip()
+    except OSError:
+        app_ref = "IngeTrazo (unknown build)"
+    log(f"ingetrazo-docker {os.environ.get('INGETRAZO_DOCKER_VERSION') or 'dev'}; {app_ref}")
     if MODE == "mcp":
         log(f"MCP engine on :{port}/rpc and /call; data {DATA_DIR}")
         app.start(initial_model(), allow_save=env_flag("INGETRAZO_ALLOW_SAVE", True),
