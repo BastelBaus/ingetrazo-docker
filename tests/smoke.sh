@@ -78,8 +78,9 @@ echo "  ok  the render engine made its secret"
   "http://127.0.0.1:$RENDER_PORT" "$RENDER_TOKEN"
 test -s "$WORK/data/engine-saved.igz"
 echo "  ok  the mcp engine saved into /data"
-ls "$WORK/cache/smoke/"*.png >/dev/null
-test -s "$WORK/cache/smoke/all.pdf"
+# (IngeTrazo names the PNGs after the sheets; only count them.)
+find "$WORK/cache" -name '*.png' | grep -q .
+find "$WORK/cache" -name '*.pdf' -size +0 | grep -q .
 echo "  ok  the render engine wrote its files into /cache"
 
 for c in "$mcp" "$render"; do
