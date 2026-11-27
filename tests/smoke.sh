@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # End-to-end smoke test of an image: the MCP service and the viewer, on a
-# data folder with one of IngeTrazo's example models.
+# data folder with one of IngeTrazo's example models. With VIEWER_IMAGE also
+# the split setup: the viewer image (no IngeTrazo) rendering through an
+# engine container.
 #
-#   IMAGE=ingetrazo-docker:dev tests/smoke.sh
+#   IMAGE=ingetrazo-docker:dev [VIEWER_IMAGE=ingetrazo-viewer:dev] tests/smoke.sh
 set -euo pipefail
 # Git Bash on Windows would rewrite container paths such as /opt/… .
 export MSYS_NO_PATHCONV=1
 
 IMAGE="${IMAGE:-ingetrazo-docker:dev}"
+VIEWER_IMAGE="${VIEWER_IMAGE:-}"
 MCP_PORT="${SMOKE_MCP_PORT:-18765}"
 VIEWER_PORT="${SMOKE_VIEWER_PORT:-18080}"
 TOKEN="smoke-$(date +%s)-token-0123456789"
@@ -38,6 +41,11 @@ mcp_folders="smoke-mcp-folders-$$"
 v_folders="smoke-viewer-folders-$$"
 FOLDERS_MCP_PORT="${SMOKE_FOLDERS_MCP_PORT:-18767}"
 FOLDERS_VIEWER_PORT="${SMOKE_FOLDERS_VIEWER_PORT:-18085}"
+# Split: viewer image + render engine (engine image), on their own network.
+s_engine="smoke-engine-$$"
+s_viewer="smoke-viewer-split-$$"
+s_net="smoke-split-net-$$"
+SPLIT_PORT="${SMOKE_SPLIT_PORT:-18086}"
 
 # Docker Desktop on Windows (Git Bash) wants a Windows path for -v.
 host_path() { (cd "$1" && (pwd -W 2>/dev/null || pwd)); }
@@ -48,13 +56,14 @@ cleanup() {
     echo "---- logs: mcp ----";    docker logs "$mcp" 2>&1 | tail -60 || true
     echo "---- logs: viewer ----"; docker logs "$viewer" 2>&1 | tail -60 || true
     echo "---- logs: mcp (oauth) ----"; docker logs "$mcp_oauth" 2>&1 | tail -40 || true
-    for c in "$v_none" "$v_proxy" "$v_oidc" "$oidc" "$mcp_folders" "$v_folders"; do
+    for c in "$v_none" "$v_proxy" "$v_oidc" "$oidc" "$mcp_folders" "$v_folders" \
+             "$s_engine" "$s_viewer"; do
       echo "---- logs: $c ----"; docker logs "$c" 2>&1 | tail -30 || true
     done
   fi
   docker rm -f -v "$mcp" "$viewer" "$mcp_oauth" "$v_none" "$v_proxy" "$v_oidc" "$oidc" \
-    "$mcp_folders" "$v_folders" >/dev/null 2>&1 || true
-  docker network rm "$net" >/dev/null 2>&1 || true
+    "$mcp_folders" "$v_folders" "$s_engine" "$s_viewer" >/dev/null 2>&1 || true
+  docker network rm "$net" "$s_net" >/dev/null 2>&1 || true
   exit $status
 }
 trap cleanup EXIT
@@ -152,7 +161,65 @@ users_in "$v_oidc" | grep -q "'alice'"
 users_in "$v_proxy" | grep -q "'bob'"
 echo "  ok  oidc and proxy users recorded in the user list (users.db)"
 
-for c in "$mcp" "$viewer"; do
+health_of=("$mcp" "$viewer")
+if [ -n "$VIEWER_IMAGE" ]; then
+  echo "== split: viewer image ($VIEWER_IMAGE) + render engine"
+  echo "-- the viewer image has no IngeTrazo and no X server"
+  docker run --rm --entrypoint sh "$VIEWER_IMAGE" -c \
+    'test ! -e /opt/ingetrazo && ! command -v xvfb-run >/dev/null'
+  echo "  ok"
+  echo "-- the viewer image refuses to start without ENGINE_URLS"
+  if out="$(docker run --rm -e ADMIN_PASSWORD="$PASSWORD" "$VIEWER_IMAGE" viewer 2>&1)"; then
+    echo "it started"; exit 1
+  fi
+  echo "$out" | grep -q "ENGINE_URLS"
+  echo "  ok"
+  echo "-- the engine refuses to start without a secret"
+  if out="$(docker run --rm "$IMAGE" engine 2>&1)"; then
+    echo "it started"; exit 1
+  fi
+  echo "$out" | grep -q "ENGINE_TOKEN"
+  echo "  ok"
+
+  mkdir -p "$WORK/split-cache" "$WORK/engine-secret"
+  chmod 777 "$WORK/split-cache" "$WORK/engine-secret"
+  S_CACHE="$(host_path "$WORK/split-cache")"
+  S_SECRET="$(host_path "$WORK/engine-secret")"
+  docker network create "$s_net" >/dev/null
+  # The engine makes the secret in the shared folder; the viewer reads it.
+  docker run -d --name "$s_engine" --network "$s_net" --network-alias viewer-engine \
+    -e HEALTH_PORT=8766 -e ENGINE_TOKEN_FILE=/engine/token \
+    -v "$DATA:/data:ro" -v "$S_CACHE:/cache" -v "$S_SECRET:/engine" \
+    "$IMAGE" engine >/dev/null
+  docker run -d --name "$s_viewer" --network "$s_net" -p "127.0.0.1:$SPLIT_PORT:8080" \
+    -e ADMIN_PASSWORD="$PASSWORD" -e VIEWER_POLL_SECONDS=1 \
+    -e ENGINE_URLS=http://viewer-engine:8766 -e ENGINE_TOKEN_FILE=/engine/token \
+    -v "$DATA:/data:ro" -v "$S_CACHE:/cache" -v "$S_SECRET:/engine:ro" \
+    "$VIEWER_IMAGE" viewer >/dev/null
+  "$PY" "$TESTS/smoke_viewer.py" "http://127.0.0.1:$SPLIT_PORT" admin "$PASSWORD"
+  echo "-- the engine turns away a wrong secret and tools the viewer does not use"
+  docker exec "$s_viewer" python - <<'PY'
+import json, urllib.error, urllib.request
+token = open("/engine/token").read().strip()
+def call(tool, args, tok):
+    req = urllib.request.Request("http://viewer-engine:8766/call",
+        json.dumps({"tool": tool, "args": args}).encode(),
+        {"Authorization": "Bearer " + tok, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+assert call("list_documents", {}, "wrong-" + token) == 401
+assert call("save_document", {"path": "/data/x.igz"}, token) == 403
+assert call("export_pdf", {"path": "/data/x.pdf"}, token) == 403
+assert call("list_documents", {}, token) == 200
+PY
+  echo "  ok"
+  health_of+=("$s_engine" "$s_viewer")
+fi
+
+for c in "${health_of[@]}"; do
   for _ in $(seq 1 60); do
     h="$(docker inspect -f '{{.State.Health.Status}}' "$c")"
     [ "$h" = healthy ] && break
