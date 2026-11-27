@@ -144,9 +144,12 @@ services:
       - engine-secret:/engine
 
 networks:
-  default:
   engine:
     internal: true       # viewer <-> viewer-engine only, no way out
+    # IPv4 only: some Docker hosts (TrueNAS) report an IPv6 gateway with its
+    # prefix ("fd..::1/64"), which docker compose then fails to parse on the
+    # next `up` or `down` of an existing internal network.
+    enable_ipv6: false
 
 volumes:
   mcp-state:
