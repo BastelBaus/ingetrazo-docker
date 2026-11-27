@@ -26,8 +26,8 @@ Two images, built from the one `Dockerfile` and published with the same tags:
 
 | Image | Target | Contents | Services |
 |---|---|---|---|
-| `ghcr.io/bastelbaus/ingetrazo` | `engine` (default) | IngeTrazo headless, Xvfb, Mesa | `mcp`, `engine` (and `viewer` with its own IngeTrazos, as before) |
-| `ghcr.io/bastelbaus/ingetrazo-viewer` | `viewer` | the web viewer alone, Python standard library only | `viewer`, rendering through one or more `engine` containers |
+| `ghcr.io/bastelbaus/ingetrazo` | `engine` (default) | IngeTrazo headless, Xvfb, Mesa | `engine` (for the services of the viewer image); `mcp` and `viewer` all in one, as before |
+| `ghcr.io/bastelbaus/ingetrazo-viewer` | `viewer` | users, OAuth, folder rights and pages; Python standard library only | `mcp` (the MCP gateway) and `viewer`, each through `engine` containers |
 
 | Viewer: every model in the data folder | Viewer: one model's sheets and views |
 |---|---|
@@ -131,7 +131,7 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 | `ADMIN_PASSWORD` | – | `local`: the first admin's password; login page for browsers, Basic auth for scripts. `VIEWER_USER` / `VIEWER_PASSWORD`, the old names, still work |
 | `VIEWER_PRERENDER` | `previews` | What the viewer renders before anyone looks: `previews`, `none` or `all` (see [Rendering on demand](#rendering-on-demand)) |
 | `ENGINE_URLS` | compose: `http://viewer-engine:8766` | The viewer's render engines, comma-separated, one render worker each (see [How it works](#how-it-works)); unset: the viewer runs its own IngeTrazos (engine image only) |
-| `ENGINE_TOKEN` | – | The engines' shared secret (at least 16 characters); unset in compose: the engine makes one in the `engine-secret` volume (`ENGINE_TOKEN_FILE`) |
+| `ENGINE_TOKEN` / `MCP_ENGINE_TOKEN` | – | The secret the viewer / the MCP gateway shares with its engine (at least 16 characters); unset: the engine makes one in its `*-secret` volume (`ENGINE_TOKEN_FILE`) |
 | `VIEWER_WORKERS` | `1` | Without `ENGINE_URLS` only: how many IngeTrazos the viewer starts itself, 1–16 |
 | `VIEWER_TITLE` | `IngeTrazo-docker` | The headline (overview, login page, browser tab); admins can change it at `/admin` → *Title* |
 | `VIEWER_SHEET_DPI` | `120` | Sheet image resolution |
@@ -156,11 +156,14 @@ XML; `python docs/render_drawio_png.py` re-renders the PNG from it.</sub>
 Each engine container runs one IngeTrazo **without a window** (`--headless --ai-bridge`). It renders with OpenGL in
 software (Mesa llvmpipe) inside an in-memory X server (Xvfb).
 
-- **`mcp`**: an HTTP front end. It forwards every MCP request to IngeTrazo's own handler
-  (`scripts/ingetrazo_mcp.py` of the cloned app) and talks to the app's AI bridge on the container's loopback.
-  The container adds three things: `list_documents`, a check that keeps file paths inside the model folders
-  (and writes inside the read/write ones), and hiding `shutdown`. The container's lifetime belongs to Docker. If IngeTrazo exits, the container exits too and the
-  restart policy brings it back.
+- **`mcp`** (viewer image): the MCP gateway AI clients reach. It checks the bearer token or OAuth and each user's
+  folders, adds `list_documents`, keeps file paths inside the model folders (writes inside the read/write ones,
+  and the user's), hides `shutdown`, and hands every message on to `mcp-engine`. It runs no IngeTrazo itself.
+- **`mcp-engine`** (engine image, command `engine`, `ENGINE_MODE=mcp`): the IngeTrazo the gateway forwards to,
+  through IngeTrazo's own MCP handler (`scripts/ingetrazo_mcp.py` of the cloned app). Every tool but `shutdown`,
+  paths only inside `/data`; it opens `INGETRAZO_MODEL` and saves if `INGETRAZO_ALLOW_SAVE`. No port, internal
+  network only, bearer `MCP_ENGINE_TOKEN` (or its secret volume). If IngeTrazo exits, the container exits too and
+  the restart policy brings it back.
 - **`viewer`** (viewer image): watches the model folders and has what is looked at rendered: a sheet as PNG, a
   saved view as PNG, the sheets as one PDF, the model as GLB (glTF binary, for the 3D view), into the cache. It
   serves them as web pages, and server-sent events reload an open page when what it waits for is ready. It holds
@@ -172,8 +175,8 @@ software (Mesa llvmpipe) inside an in-memory X server (Xvfb).
   allows `run_python` (the viewer reads scene folders and cameras that way), so treat it like shell access to that
   container. Several engines render side by side: add `viewer-engine-2`, … and list them in `ENGINE_URLS`.
 
-Without `ENGINE_URLS` the `viewer` command of the engine image still starts its own IngeTrazos
-(`VIEWER_WORKERS`), as before the split.
+Without `MCP_ENGINE_URL` / `ENGINE_URLS` the `mcp` and `viewer` commands of the engine image still run their own
+IngeTrazos (the viewer: `VIEWER_WORKERS`), all in one container, as before the split.
 
 Health: `GET /healthz` on both ports, used by the image's `HEALTHCHECK`. For the MCP service it checks that the
 IngeTrazo process is alive and that its bridge answers (`list_documents`). The check queues behind the MCP

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Unit tests of the render engine (mcp_http/engine_server.py) and the
-viewer's client for it (viewer/engine.py), with a fake IngeTrazo behind a
+clients for it (mcp_http/remote.py), with a fake IngeTrazo behind a
 real HTTP server (no container needed):
 
     python -m unittest discover -s tests -p "test_*.py"
@@ -19,7 +19,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mcp_http import engine_server  # noqa: E402
-from viewer import engine  # noqa: E402
+from mcp_http import remote as engine  # noqa: E402
 
 TOKEN = "test-token-0123456789abcdef"
 
@@ -38,6 +38,12 @@ class FakeApp:
     def call(self, tool, args=None, timeout=None):
         self.calls.append((tool, args or {}, timeout))
         return {"ok": True, "result": {"tool": tool}}
+
+    def handle(self, msg):
+        self.calls.append(("rpc", msg, None))
+        if "id" not in msg:
+            return None
+        return {"jsonrpc": "2.0", "id": msg["id"], "result": {"echo": msg.get("method")}}
 
 
 class CheckTest(unittest.TestCase):
@@ -63,6 +69,22 @@ class CheckTest(unittest.TestCase):
     def test_unknown_tool(self):
         self.assertIn("not available", self.check("save_document", {}))
         self.assertIn("not available", self.check("shutdown", {}))
+
+    def test_mcp_mode(self):
+        def check(tool, args):
+            return engine_server.check(tool, args, self.data, self.cache, "mcp")
+        self.assertIsNone(check("save_document", {}))
+        self.assertIsNone(check("save_document", {"path": str(self.data / "b.igz")}))
+        self.assertIsNone(check("export_pdf", {"path": str(self.data / "out" / "s.pdf")}))
+        self.assertIsNone(check("import_file", {"path": str(self.data / "x.skp")}))
+        self.assertIsNone(check("query_model", {}))
+        self.assertIn("not available", check("shutdown", {}))
+        self.assertIn("below", check("export_pdf", {"path": str(self.cache / "s.pdf")}))
+        self.assertIn("below", check("save_document", {"path": "/etc/x.igz"}))
+        self.assertIsNone(check("render_sheet", {"document_id": 1}))   # inline image
+        self.assertIn("below", check("import_file", {"path": "/etc/passwd"}))
+        # The render engine never saves.
+        self.assertIn("not available", self.check("save_document", {}))
 
     def test_paths_confined(self):
         self.assertIn("below", self.check("open_document", {"path": str(self.cache / "a.igz")}))
@@ -117,6 +139,7 @@ class RoundTripTest(unittest.TestCase):
         self.patches = [
             mock.patch.object(engine_server, "app", self.fake, create=True),
             mock.patch.object(engine_server, "TOKEN", TOKEN),
+            mock.patch.object(engine_server, "MODE", "mcp"),
             mock.patch.object(engine_server, "DATA_DIR", root),
             mock.patch.dict(os.environ, {"INGETRAZO_CACHE": str(self.cache)}),
         ]
@@ -143,6 +166,39 @@ class RoundTripTest(unittest.TestCase):
         self.assertTrue(reply["ok"])
         self.assertEqual(self.fake.calls[-1], ("export_pdf", {"path": str(self.cache / "s.pdf")}, 5.0))
 
+    def test_rpc(self):
+        app = engine.RemoteApp(self.url, TOKEN)
+        reply = app.handle({"jsonrpc": "2.0", "id": 7, "method": "tools/list"})
+        self.assertEqual(reply, {"jsonrpc": "2.0", "id": 7, "result": {"echo": "tools/list"}})
+        self.assertIsNone(app.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        refused = app.handle({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                              "params": {"name": "shutdown", "arguments": {}}})
+        self.assertTrue(refused["result"]["isError"])
+        self.assertEqual([c[1].get("method") for c in self.fake.calls],
+                         ["tools/list", "notifications/initialized"])
+        status, body = app.probe()
+        self.assertEqual((status, body), (200, {"status": "ok"}))
+
+    def test_gateway(self):
+        """mcp_http.server's handler with the engine as its app: the
+        container's own list_documents is added, shutdown stays hidden."""
+        from mcp_http import server
+        self.fake.handle = lambda msg: {"jsonrpc": "2.0", "id": msg.get("id"), "result": {
+            "tools": [{"name": "query_model"}, {"name": "shutdown"}, {"name": "list_documents"}]}}
+        with mock.patch.object(server, "app", engine.RemoteApp(self.url, TOKEN), create=True):
+            reply = server._handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+            names = [t["name"] for t in reply["result"]["tools"]]
+            self.assertEqual(names, ["query_model", "list_documents"])
+            hidden = server._handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                     "params": {"name": "shutdown", "arguments": {}}})
+            self.assertTrue(hidden["result"]["isError"])
+
+    def test_rpc_only_in_mcp_mode(self):
+        with mock.patch.object(engine_server, "MODE", "render"):
+            with self.assertRaises(RuntimeError):
+                engine.RemoteApp(self.url, TOKEN).handle({"jsonrpc": "2.0", "id": 1,
+                                                          "method": "tools/list"})
+
     def test_wrong_token(self):
         reply = engine.RemoteApp(self.url, "wrong-token-0123456789").call("list_sheets")
         self.assertFalse(reply["ok"])
@@ -150,7 +206,7 @@ class RoundTripTest(unittest.TestCase):
         self.assertEqual(self.fake.calls, [])
 
     def test_refused_tool(self):
-        reply = engine.RemoteApp(self.url, TOKEN).call("save_document", {"path": "/x"})
+        reply = engine.RemoteApp(self.url, TOKEN).call("shutdown", {})
         self.assertFalse(reply["ok"])
         self.assertIn("not available", reply["error"])
         self.assertEqual(self.fake.calls, [])
@@ -167,7 +223,7 @@ class RoundTripTest(unittest.TestCase):
         app = engine.RemoteApp("http://127.0.0.1:9", TOKEN)
         reply = app.call("list_sheets")
         self.assertFalse(reply["ok"])
-        self.assertIn("render engine", reply["error"])
+        self.assertIn("engine http://127.0.0.1:9", reply["error"])
 
 
 if __name__ == "__main__":

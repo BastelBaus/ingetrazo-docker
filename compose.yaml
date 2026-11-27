@@ -3,10 +3,13 @@
 #   docker compose up -d                       # MCP server only
 #   docker compose --profile viewer up -d      # + the live web viewer
 #
-# Two images: the engine (IngeTrazo headless; services mcp and
-# viewer-engine) and the viewer (web viewer alone, no IngeTrazo). The viewer
-# renders through viewer-engine on an internal network; the engine's
-# secret is made on first start in a shared volume (or set ENGINE_TOKEN).
+# Two images:
+#   viewer image  mcp (the MCP gateway) and viewer: users, OAuth, folder
+#                 rights, pages; no IngeTrazo
+#   engine image  mcp-engine and viewer-engine: IngeTrazo headless, on an
+#                 internal network only
+# Each engine makes its secret on first start in a volume it shares with
+# its service (or set ENGINE_TOKEN).
 #
 # Settings come from .env (copy .env.example). Models live in ./data
 # (or INGETRAZO_DATA_DIR); every service sees the same folder.
@@ -28,12 +31,25 @@ x-image: &image
   shm_size: 256m
 
 services:
+  # The MCP gateway: what AI clients reach. Checks tokens / OAuth and each
+  # user's folders, then forwards to mcp-engine.
   mcp:
-    <<: *image
+    image: ${VIEWER_IMAGE:-ghcr.io/bastelbaus/ingetrazo-viewer:latest}
+    build:
+      context: .
+      target: viewer
+      args:
+        INGETRAZO_DOCKER_REF: ${INGETRAZO_DOCKER_REF:-dev}
+    restart: unless-stopped
+    init: false
     command: ["mcp"]
+    depends_on:
+      - mcp-engine
+    networks: [default, engine]
     ports:
       - "${MCP_BIND:-127.0.0.1}:${MCP_PORT:-8765}:8765"
     environment:
+      HEALTH_PORT: "8765"
       MCP_AUTH: ${MCP_AUTH:-token}
       MCP_TOKEN: ${MCP_TOKEN:-}
       PUBLIC_URL: ${PUBLIC_URL:-}
@@ -43,6 +59,33 @@ services:
       OAUTH_REDIRECT_URIS: ${OAUTH_REDIRECT_URIS:-}
       OAUTH_ACCESS_TOKEN_SECONDS: ${OAUTH_ACCESS_TOKEN_SECONDS:-}
       OAUTH_REFRESH_TOKEN_DAYS: ${OAUTH_REFRESH_TOKEN_DAYS:-}
+      MODEL_FOLDERS: ${MODEL_FOLDERS:-}
+      MODEL_SCAN_DEPTH: ${MODEL_SCAN_DEPTH:-}
+      MODEL_EXCLUDE: ${MODEL_EXCLUDE:-}
+      INGETRAZO_AI_TIMEOUT: ${INGETRAZO_AI_TIMEOUT:-}
+      MCP_ENGINE_URL: http://mcp-engine:8766
+      ENGINE_TOKEN: ${MCP_ENGINE_TOKEN:-}
+      ENGINE_TOKEN_FILE: /engine/token
+      USERS_DB: /users/users.db
+      DEFAULT_SHARES: ${DEFAULT_SHARES:-*:r}
+    volumes:
+      # Read-only here: the gateway only checks paths; mcp-engine writes.
+      - ${INGETRAZO_DATA_DIR:-./data}:/data:ro
+      - mcp-state:/state
+      - users:/users
+      - mcp-engine-secret:/engine:ro
+
+  # IngeTrazo for the MCP gateway: every tool but shutdown, paths inside
+  # /data. Only on the internal network, no port.
+  mcp-engine:
+    <<: *image
+    command: ["engine"]
+    networks: [engine]
+    environment:
+      ENGINE_MODE: mcp
+      HEALTH_PORT: "8766"
+      ENGINE_TOKEN: ${MCP_ENGINE_TOKEN:-}
+      ENGINE_TOKEN_FILE: /engine/token
       INGETRAZO_MODEL: ${INGETRAZO_MODEL:-}
       MODEL_FOLDERS: ${MODEL_FOLDERS:-}
       MODEL_SCAN_DEPTH: ${MODEL_SCAN_DEPTH:-}
@@ -52,12 +95,10 @@ services:
       INGETRAZO_AI_TIMEOUT: ${INGETRAZO_AI_TIMEOUT:-}
       HEALTH_MAX_BUSY_SECONDS: ${HEALTH_MAX_BUSY_SECONDS:-}
       XVFB_SCREEN: ${XVFB_SCREEN:-}
-      USERS_DB: /users/users.db
-      DEFAULT_SHARES: ${DEFAULT_SHARES:-*:r}
     volumes:
       - ${INGETRAZO_DATA_DIR:-./data}:/data
-      - mcp-state:/state
-      - users:/users
+      - mcp-engine-state:/state
+      - mcp-engine-secret:/engine
 
   viewer:
     image: ${VIEWER_IMAGE:-ghcr.io/bastelbaus/ingetrazo-viewer:latest}
@@ -109,7 +150,7 @@ services:
       INGETRAZO_AI_TIMEOUT: ${INGETRAZO_AI_TIMEOUT:-}
       # The render engine(s); several: one URL per engine service.
       ENGINE_URLS: ${ENGINE_URLS:-http://viewer-engine:8766}
-      ENGINE_TOKEN: ${ENGINE_TOKEN:-}
+      ENGINE_TOKEN: ${VIEWER_ENGINE_TOKEN:-${ENGINE_TOKEN:-}}
       ENGINE_TOKEN_FILE: /engine/token
       USERS_DB: /users/users.db
       DEFAULT_SHARES: ${DEFAULT_SHARES:-*:r}
@@ -129,7 +170,7 @@ services:
     networks: [engine]
     environment:
       HEALTH_PORT: "8766"
-      ENGINE_TOKEN: ${ENGINE_TOKEN:-}
+      ENGINE_TOKEN: ${VIEWER_ENGINE_TOKEN:-${ENGINE_TOKEN:-}}
       ENGINE_TOKEN_FILE: /engine/token
       MODEL_FOLDERS: ${MODEL_FOLDERS:-}
       MODEL_SCAN_DEPTH: ${MODEL_SCAN_DEPTH:-}
@@ -145,7 +186,7 @@ services:
 
 networks:
   engine:
-    internal: true       # viewer <-> viewer-engine only, no way out
+    internal: true       # the services <-> their engines only, no way out
     # IPv4 only: some Docker hosts (TrueNAS) report an IPv6 gateway with its
     # prefix ("fd..::1/64"), which docker compose then fails to parse on the
     # next `up` or `down` of an existing internal network.
@@ -156,5 +197,7 @@ volumes:
   viewer-cache:
   viewer-state:
   engine-state:
-  engine-secret:         # the viewer engine's secret, made on its first start
+  engine-secret:
+  mcp-engine-state:
+  mcp-engine-secret:     # the MCP engine's secret, made on its first start         # the viewer engine's secret, made on its first start
   users:                 # the user list (users.db), shared by both services
