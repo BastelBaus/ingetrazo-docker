@@ -3,8 +3,13 @@
 #   docker compose up -d                       # MCP server only
 #   docker compose --profile viewer up -d      # + the live web viewer
 #
+# Two images: the engine (IngeTrazo headless; services mcp and
+# viewer-engine) and the viewer (web viewer alone, no IngeTrazo). The viewer
+# renders through viewer-engine on an internal network; the engine's
+# secret is made on first start in a shared volume (or set ENGINE_TOKEN).
+#
 # Settings come from .env (copy .env.example). Models live in ./data
-# (or INGETRAZO_DATA_DIR); both services see the same folder.
+# (or INGETRAZO_DATA_DIR); every service sees the same folder.
 # Several model folders, each read-only or read/write: MODEL_FOLDERS in
 # .env and their bind mounts in compose.override.yaml (see
 # compose.folders.example.yaml and the README).
@@ -17,6 +22,7 @@ x-image: &image
       INGETRAZO_REPO: ${INGETRAZO_REPO:-https://github.com/BastelBaus/ingetrazo}
       INGETRAZO_REF: ${INGETRAZO_REF:-187e43f9bc85a28b513f1d0b3f9c68a55dbf47a4}
       INGETRAZO_DOCKER_REF: ${INGETRAZO_DOCKER_REF:-dev}
+    target: engine
   restart: unless-stopped
   init: false            # tini is the image's entrypoint already
   shm_size: 256m
@@ -54,9 +60,19 @@ services:
       - users:/users
 
   viewer:
-    <<: *image
+    image: ${VIEWER_IMAGE:-ghcr.io/bastelbaus/ingetrazo-viewer:latest}
+    build:
+      context: .
+      target: viewer
+      args:
+        INGETRAZO_DOCKER_REF: ${INGETRAZO_DOCKER_REF:-dev}
+    restart: unless-stopped
+    init: false
     profiles: ["viewer"]
     command: ["viewer"]
+    depends_on:
+      - viewer-engine
+    networks: [default, engine]
     ports:
       - "${VIEWER_BIND:-127.0.0.1}:${VIEWER_PORT:-8080}:8080"
     environment:
@@ -87,12 +103,14 @@ services:
       MODEL_EXCLUDE: ${MODEL_EXCLUDE:-}
       VIEWER_TITLE: ${VIEWER_TITLE:-IngeTrazo-docker}
       VIEWER_PRERENDER: ${VIEWER_PRERENDER:-previews}
-      VIEWER_WORKERS: ${VIEWER_WORKERS:-1}
       VIEWER_SHEET_DPI: ${VIEWER_SHEET_DPI:-120}
       VIEWER_NAV_MODE: ${VIEWER_NAV_MODE:-tree}
       VIEWER_GLB_MAX_MB: ${VIEWER_GLB_MAX_MB:-50}
       INGETRAZO_AI_TIMEOUT: ${INGETRAZO_AI_TIMEOUT:-}
-      XVFB_SCREEN: ${XVFB_SCREEN:-}
+      # The render engine(s); several: one URL per engine service.
+      ENGINE_URLS: ${ENGINE_URLS:-http://viewer-engine:8766}
+      ENGINE_TOKEN: ${ENGINE_TOKEN:-}
+      ENGINE_TOKEN_FILE: /engine/token
       USERS_DB: /users/users.db
       DEFAULT_SHARES: ${DEFAULT_SHARES:-*:r}
     volumes:
@@ -100,9 +118,40 @@ services:
       - viewer-cache:/cache
       - viewer-state:/state
       - users:/users
+      - engine-secret:/engine:ro
+
+  # IngeTrazo for the viewer: renders into the cache both mount at /cache.
+  # Only on the internal network, no port; never saves a model.
+  viewer-engine:
+    <<: *image
+    profiles: ["viewer"]
+    command: ["engine"]
+    networks: [engine]
+    environment:
+      HEALTH_PORT: "8766"
+      ENGINE_TOKEN: ${ENGINE_TOKEN:-}
+      ENGINE_TOKEN_FILE: /engine/token
+      MODEL_FOLDERS: ${MODEL_FOLDERS:-}
+      MODEL_SCAN_DEPTH: ${MODEL_SCAN_DEPTH:-}
+      MODEL_EXCLUDE: ${MODEL_EXCLUDE:-}
+      INGETRAZO_AI_TIMEOUT: ${INGETRAZO_AI_TIMEOUT:-}
+      HEALTH_MAX_BUSY_SECONDS: ${HEALTH_MAX_BUSY_SECONDS:-}
+      XVFB_SCREEN: ${XVFB_SCREEN:-}
+    volumes:
+      - ${INGETRAZO_DATA_DIR:-./data}:/data:ro
+      - viewer-cache:/cache
+      - engine-state:/state
+      - engine-secret:/engine
+
+networks:
+  default:
+  engine:
+    internal: true       # viewer <-> viewer-engine only, no way out
 
 volumes:
   mcp-state:
   viewer-cache:
   viewer-state:
+  engine-state:
+  engine-secret:         # the viewer engine's secret, made on its first start
   users:                 # the user list (users.db), shared by both services

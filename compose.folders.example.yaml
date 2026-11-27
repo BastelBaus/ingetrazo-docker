@@ -4,9 +4,10 @@
 #
 #   MODEL_FOLDERS=projects:rw; archive:ro:depth=1:exclude=old*,*.bak.igz
 #
-# Each folder is mounted at /data/<name> in both services. The MCP service
+# Each folder is mounted at /data/<name> in every service. The MCP service
 # may write to the rw ones (mount the ro ones read-only too, as below); the
-# viewer mounts every folder read-only.
+# viewer and its render engine mount every folder read-only, at the same
+# paths (the viewer names the files the engine opens).
 #
 # /data itself becomes an empty volume (the entries with target /data
 # replace compose.yaml's ./data mount): the folders are mounted inside it,
@@ -21,6 +22,12 @@ services:
       - /srv/models/archive:/data/archive:ro
 
   viewer:
+    volumes:
+      - model-folders:/data
+      - /srv/models/projects:/data/projects:ro
+      - /srv/models/archive:/data/archive:ro
+
+  viewer-engine:
     volumes:
       - model-folders:/data
       - /srv/models/projects:/data/projects:ro
