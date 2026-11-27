@@ -8,7 +8,7 @@ feature/*, fix/* --PR--> dev --> release/vX.Y --PR--> main --> tag vX.Y.Z
 hotfix/* (from main) --PR--> main --> tag vX.Y.Z+1 --> back-merge into dev
 ```
 
-| Branch / tag | What it is | Images (`ghcr.io/bastelbaus/ingetrazo` and `…/ingetrazo-viewer`, same tags) |
+| Branch / tag | What it is | Image (`ghcr.io/bastelbaus/ingetrazo`) |
 |---|---|---|
 | `dev` | Integration branch, default branch, target of all feature PRs | `:dev`, `:dev-<sha>` (amd64) |
 | any branch, manual *Publish* run | Try a branch in a container | `:br-<branch>` (amd64) |
@@ -77,8 +77,8 @@ The checks:
 - **DCO**: every commit in the PR carries a `Signed-off-by` line, or a remediation commit in the PR
   signs it off afterwards (see [CONTRIBUTING.md](../CONTRIBUTING.md#developer-certificate-of-origin-dco)).
   Merge commits are not checked. Takes seconds.
-- **smoke**: shellcheck, unit tests, the image built for amd64, and a short end-to-end run of the MCP
-  service and the viewer (`tests/smoke.sh`). Takes a few minutes, so it runs on every PR.
+- **smoke**: shellcheck, unit tests, the image built for amd64, and a short end-to-end run of an
+  engine in both modes (`tests/smoke.sh`). Takes a few minutes, so it runs on every PR.
 - **full test** (planned): the long run before a release. It runs only on PRs into `main`, i.e. release
   and hotfix PRs. Its scope is still open. Candidates: the image for amd64 and arm64, the smoke test on both, the
   auth, OAuth and folder smoke tests, and rendering a sample model with all its sheets and views.

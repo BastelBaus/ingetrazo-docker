@@ -6,10 +6,8 @@ app ships ``scripts/ingetrazo_mcp.py`` with the tool definitions, the
 instructions, the JSON-RPC ``handle()`` and the code that starts a
 window-less IngeTrazo (``--headless``) and waits for its bridge. This module
 loads that file from the app checkout, starts the child once, and serialises
-every request to it — the bridge works one request at a time, and the HTTP
-server, the viewer and the health probe all go through this one lock. The
-viewer may run several apps (``VIEWER_WORKERS``), each with its own child,
-port and lock.
+every request to it — the bridge works one request at a time, and the
+engine's HTTP API and its health probe all go through this one lock.
 """
 from __future__ import annotations
 
@@ -32,7 +30,7 @@ def log(msg: str) -> None:
 def _load_stdio_server(name: str = "ingetrazo_mcp"):
     """The app's client script as a module of its own. Each ``name`` is a
     separate copy with its own globals (``PORT``, the child process), so
-    several apps can run side by side (the viewer's render workers)."""
+    several apps could run side by side."""
     script = APP_DIR / "scripts" / "ingetrazo_mcp.py"
     spec = importlib.util.spec_from_file_location(name, script)
     if spec is None or spec.loader is None:

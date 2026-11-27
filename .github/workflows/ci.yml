@@ -1,5 +1,5 @@
-# Build both images (engine, viewer) and run the end-to-end smoke test
-# (MCP, viewer with its own IngeTrazo, and viewer image + render engine).
+# Build the engine image and run the end-to-end smoke test (an engine in
+# each mode). ingetrazo-web-viewer tests its services against :dev.
 # "upstream" builds the engine from IngeTrazo's newest release instead of
 # the fork: informational, it shows when the container can switch
 # (ingelibre/ingetrazo#1717).
@@ -28,7 +28,7 @@ jobs:
       - name: Lint shell scripts
         run: shellcheck entrypoint.sh tests/smoke.sh
 
-      - name: Unit tests (model folders, render queue, viewer pages)
+      - name: Unit tests (model folders, engine API)
         run: python3 -m unittest discover -s tests -p "test_*.py" -v
 
       - uses: docker/setup-buildx-action@v4
@@ -37,36 +37,16 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          target: engine
           load: true
           tags: ingetrazo-docker:ci
           cache-from: type=gha,scope=amd64
           cache-to: type=gha,scope=amd64,mode=max
 
-      - name: Build viewer image (amd64)
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          target: viewer
-          load: true
-          tags: ingetrazo-viewer:ci
-          cache-from: |
-            type=gha,scope=amd64
-            type=gha,scope=viewer-amd64
-          cache-to: type=gha,scope=viewer-amd64,mode=max
-
       - name: Smoke test
         env:
           IMAGE: ingetrazo-docker:ci
-          VIEWER_IMAGE: ingetrazo-viewer:ci
         run: tests/smoke.sh
 
-      - name: Validate compose file
-        env:
-          MCP_TOKEN: ci-dummy-token-0123456789
-        run: |
-          docker compose --profile viewer config -q
-          docker compose -f compose.yaml -f compose.folders.example.yaml --profile viewer config -q
 
   # IngeTrazo's newest upstream release instead of the fork: does it have
   # what the container needs (tests/upstream_ready.py)? Green with a warning
@@ -93,7 +73,6 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          target: engine
           load: true
           tags: ingetrazo-docker:upstream
           build-args: |
@@ -119,19 +98,8 @@ jobs:
             echo "::warning title=Upstream not ready::IngeTrazo $TAG lacks what the container needs (ingelibre/ingetrazo#1717); smoke test skipped"
           fi
 
-      - name: Build viewer image
-        if: steps.ready.outputs.ready == 'true'
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          target: viewer
-          load: true
-          tags: ingetrazo-viewer:upstream
-          cache-from: type=gha,scope=viewer-amd64
-
       - name: Smoke test
         if: steps.ready.outputs.ready == 'true'
         env:
           IMAGE: ingetrazo-docker:upstream
-          VIEWER_IMAGE: ingetrazo-viewer:upstream
         run: tests/smoke.sh

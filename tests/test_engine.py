@@ -1,27 +1,49 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Unit tests of the render engine (mcp_http/engine_server.py) and the
-clients for it (mcp_http/remote.py), with a fake IngeTrazo behind a
-real HTTP server (no container needed):
+"""Unit tests of the engine (engine/server.py): its checks, its secret and
+its HTTP API, with a fake IngeTrazo behind a real HTTP server (no
+container needed):
 
     python -m unittest discover -s tests -p "test_*.py"
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
+import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from mcp_http import engine_server  # noqa: E402
-from mcp_http import remote as engine  # noqa: E402
+from engine import server as engine_server  # noqa: E402
 
 TOKEN = "test-token-0123456789abcdef"
+
+
+def post(url, path, body, token=TOKEN):
+    """(HTTP status, JSON body) of a POST to the engine."""
+    req = urllib.request.Request(url + path, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read() or b"null")
+
+
+def get(url, path):
+    try:
+        with urllib.request.urlopen(url + path, timeout=10) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read())
 
 
 class FakeApp:
@@ -111,23 +133,10 @@ class TokenTest(unittest.TestCase):
                 self.assertEqual(engine_server.engine_token(), made)    # viewer reads it
                 self.assertEqual(sorted(p.name for p in f.parent.iterdir()), ["token"])
 
-    def test_urls(self):
-        with mock.patch.dict(os.environ, {"ENGINE_URLS": "", "ENGINE_TOKEN": ""}):
-            self.assertEqual(engine.engine_urls(), [])
-        with mock.patch.dict(os.environ, {"ENGINE_URLS": "http://a:1/, http://b:2",
-                                          "ENGINE_TOKEN": TOKEN}):
-            self.assertEqual(engine.engine_urls(), ["http://a:1", "http://b:2"])
-        with mock.patch.dict(os.environ, {"ENGINE_URLS": "a:1", "ENGINE_TOKEN": TOKEN}):
-            with self.assertRaises(SystemExit):
-                engine.engine_urls()
-        with mock.patch.dict(os.environ, {"ENGINE_URLS": "http://a:1", "ENGINE_TOKEN": "",
-                                          "ENGINE_TOKEN_FILE": ""}):
-            with self.assertRaises(SystemExit):
-                engine.engine_urls()
 
 
 class RoundTripTest(unittest.TestCase):
-    """RemoteApp → engine HTTP server → fake app, and back."""
+    """HTTP → engine → fake app, and back."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -155,74 +164,54 @@ class RoundTripTest(unittest.TestCase):
             p.stop()
         self.tmp.cleanup()
 
+    def test_health(self):
+        self.assertEqual(get(self.url, "/healthz"), (200, {"status": "ok"}))
+        self.fake.up = False
+        self.assertEqual(get(self.url, "/healthz")[0], 503)
+
     def test_call(self):
-        app = engine.RemoteApp(self.url, TOKEN)
-        app.start()
-        self.assertTrue(app.alive())
-        reply = app.call("list_sheets", {})
-        self.assertEqual(reply, {"ok": True, "result": {"tool": "list_sheets"}})
-        reply = app.call("export_pdf", {"path": str(self.cache / "s.pdf")}, timeout=5)
-        self.assertTrue(reply["ok"])
-        self.assertEqual(self.fake.calls[-1], ("export_pdf", {"path": str(self.cache / "s.pdf")}, 5.0))
+        status, reply = post(self.url, "/call", {"tool": "list_sheets", "args": {}})
+        self.assertEqual((status, reply), (200, {"ok": True, "result": {"tool": "list_sheets"}}))
+        path = str(self.cache.parent / "data" / "s.pdf")
+        status, reply = post(self.url, "/call", {"tool": "export_pdf", "args": {"path": path},
+                                                 "timeout": 5})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.fake.calls[-1], ("export_pdf", {"path": path}, 5.0))
 
     def test_rpc(self):
-        app = engine.RemoteApp(self.url, TOKEN)
-        reply = app.handle({"jsonrpc": "2.0", "id": 7, "method": "tools/list"})
+        status, reply = post(self.url, "/rpc", {"jsonrpc": "2.0", "id": 7, "method": "tools/list"})
         self.assertEqual(reply, {"jsonrpc": "2.0", "id": 7, "result": {"echo": "tools/list"}})
-        self.assertIsNone(app.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}))
-        refused = app.handle({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
-                              "params": {"name": "shutdown", "arguments": {}}})
+        status, reply = post(self.url, "/rpc", {"jsonrpc": "2.0", "method": "notifications/initialized"})
+        self.assertEqual((status, reply), (200, None))
+        status, refused = post(self.url, "/rpc", {"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                                                  "params": {"name": "shutdown", "arguments": {}}})
         self.assertTrue(refused["result"]["isError"])
         self.assertEqual([c[1].get("method") for c in self.fake.calls],
                          ["tools/list", "notifications/initialized"])
-        status, body = app.probe()
-        self.assertEqual((status, body), (200, {"status": "ok"}))
-
-    def test_gateway(self):
-        """mcp_http.server's handler with the engine as its app: the
-        container's own list_documents is added, shutdown stays hidden."""
-        from mcp_http import server
-        self.fake.handle = lambda msg: {"jsonrpc": "2.0", "id": msg.get("id"), "result": {
-            "tools": [{"name": "query_model"}, {"name": "shutdown"}, {"name": "list_documents"}]}}
-        with mock.patch.object(server, "app", engine.RemoteApp(self.url, TOKEN), create=True):
-            reply = server._handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-            names = [t["name"] for t in reply["result"]["tools"]]
-            self.assertEqual(names, ["query_model", "list_documents"])
-            hidden = server._handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                                     "params": {"name": "shutdown", "arguments": {}}})
-            self.assertTrue(hidden["result"]["isError"])
 
     def test_rpc_only_in_mcp_mode(self):
         with mock.patch.object(engine_server, "MODE", "render"):
-            with self.assertRaises(RuntimeError):
-                engine.RemoteApp(self.url, TOKEN).handle({"jsonrpc": "2.0", "id": 1,
-                                                          "method": "tools/list"})
+            status, _ = post(self.url, "/rpc", {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+            self.assertEqual(status, 404)
 
     def test_wrong_token(self):
-        reply = engine.RemoteApp(self.url, "wrong-token-0123456789").call("list_sheets")
-        self.assertFalse(reply["ok"])
-        self.assertIn("unauthorized", reply["error"])
+        status, reply = post(self.url, "/call", {"tool": "list_sheets"}, token="wrong-token-0123456789")
+        self.assertEqual((status, reply), (401, {"error": "unauthorized"}))
+        status, _ = post(self.url, "/rpc", {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+                         token="wrong-token-0123456789")
+        self.assertEqual(status, 401)
         self.assertEqual(self.fake.calls, [])
 
     def test_refused_tool(self):
-        reply = engine.RemoteApp(self.url, TOKEN).call("shutdown", {})
-        self.assertFalse(reply["ok"])
+        status, reply = post(self.url, "/call", {"tool": "shutdown", "args": {}})
+        self.assertEqual(status, 403)
         self.assertIn("not available", reply["error"])
         self.assertEqual(self.fake.calls, [])
 
     def test_engine_down(self):
-        app = engine.RemoteApp(self.url, TOKEN)
-        app.ready = True
         self.fake.up = False
-        self.assertFalse(app.alive())
-        reply = app.call("list_sheets")
-        self.assertFalse(reply["ok"])
-
-    def test_unreachable(self):
-        app = engine.RemoteApp("http://127.0.0.1:9", TOKEN)
-        reply = app.call("list_sheets")
-        self.assertFalse(reply["ok"])
-        self.assertIn("engine http://127.0.0.1:9", reply["error"])
+        status, reply = post(self.url, "/call", {"tool": "list_sheets"})
+        self.assertEqual(status, 503)
 
 
 if __name__ == "__main__":

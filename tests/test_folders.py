@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from mcp_http import folders  # noqa: E402
+from engine import folders  # noqa: E402
 
 
 def touch(root: Path, *names: str) -> None:
