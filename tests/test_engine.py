@@ -103,6 +103,7 @@ class CheckTest(unittest.TestCase):
         self.assertIn("not available", check("shutdown", {}))
         self.assertIn("below", check("export_pdf", {"path": str(self.cache / "s.pdf")}))
         self.assertIn("below", check("save_document", {"path": "/etc/x.igz"}))
+        self.assertIsNone(check("render_sheet", {"document_id": 1}))   # inline image
         self.assertIn("below", check("import_file", {"path": "/etc/passwd"}))
         # The render engine never saves.
         self.assertIn("not available", self.check("save_document", {}))
