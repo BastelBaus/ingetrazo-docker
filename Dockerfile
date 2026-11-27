@@ -13,12 +13,16 @@ FROM python:3.12-slim-bookworm
 # Which IngeTrazo to build. Headless mode is in IngeTrazo 0.6.3; the sheet
 # and scene tools the web viewer needs come with ingelibre/ingetrazo#1544 (and
 # #1586, #1683, #1685; tracked in ingelibre/ingetrazo#1717). Until those
-# are merged upstream the default is their branch on the fork, pinned by
-# commit so a build is reproducible. Then: INGETRAZO_REPO=
-# https://github.com/ingelibre/ingetrazo and INGETRAZO_REF=<release tag>
-# (CI already builds an upstream release, see .github/workflows/ci.yml).
+# are merged upstream the default is the fork's integration branch
+# deploy/docker: upstream main plus the open pull requests that concern the
+# web viewer (#1544, #1586, #1683, #1685, #1690, #1532, #1545, #1543, #1542,
+# #1720, #1692), pinned by commit so a build is reproducible. When upstream
+# merges one, deploy/docker is rebuilt from the new main with the rest. Once
+# all are merged: INGETRAZO_REPO=https://github.com/ingelibre/ingetrazo and
+# INGETRAZO_REF=<release tag> (CI already builds an upstream release, see
+# .github/workflows/ci.yml).
 ARG INGETRAZO_REPO=https://github.com/BastelBaus/ingetrazo
-ARG INGETRAZO_REF=187e43f9bc85a28b513f1d0b3f9c68a55dbf47a4
+ARG INGETRAZO_REF=65b9810629c8aef8dfdef985056fd0cf863beea0
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
