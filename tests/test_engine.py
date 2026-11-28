@@ -170,6 +170,11 @@ class RoundTripTest(unittest.TestCase):
         self.fake.up = False
         self.assertEqual(get(self.url, "/healthz")[0], 503)
 
+    def test_health_names_the_build(self):
+        with mock.patch.object(engine_server, "APP_REF", "IngeTrazo abc (date)"):
+            self.assertEqual(get(self.url, "/healthz"),
+                             (200, {"status": "ok", "build": "IngeTrazo abc (date)"}))
+
     def test_call(self):
         status, reply = post(self.url, "/call", {"tool": "list_sheets", "args": {}})
         self.assertEqual((status, reply), (200, {"ok": True, "result": {"tool": "list_sheets"}}))

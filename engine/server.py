@@ -17,7 +17,9 @@ users and rights and have no IngeTrazo themselves).
   ``{"ok": false, "error": "..."}``.
 ``POST /rpc``  (``mcp`` mode) one MCP JSON-RPC message through IngeTrazo's
   own handler → its reply (``null`` for a notification).
-``GET /healthz``  the same probe as the MCP service (no token).
+``GET /healthz``  the same probe as the MCP service (no token), plus
+  ``build``: the IngeTrazo build inside, so the viewer knows when to render
+  its pictures again.
 
 ``/call`` and ``/rpc`` need ``Authorization: Bearer <ENGINE_TOKEN>``.
 
@@ -171,6 +173,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if urlsplit(self.path).path == "/healthz":
             status, body = app.probe(MAX_BUSY)
+            if APP_REF:
+                body = {**body, "build": APP_REF}
             return self._json(status, body)
         return self._json(404, {"error": "not found"})
 
@@ -240,11 +244,12 @@ class Server(ThreadingHTTPServer):
 app: App
 TOKEN = ""
 MODE = "render"
+APP_REF = ""    # "IngeTrazo <commit> (<date>)", from the image's BUILD_REF
 MAX_BUSY = float(os.environ.get("HEALTH_MAX_BUSY_SECONDS") or 900)
 
 
 def main() -> None:
-    global app, TOKEN, MODE
+    global app, TOKEN, MODE, APP_REF
     MODE = _mode()
     TOKEN = _token()
     app = App()
@@ -256,6 +261,8 @@ def main() -> None:
         app_ref = build.read_text(encoding="utf-8").strip()
     except OSError:
         app_ref = "IngeTrazo (unknown build)"
+    else:
+        APP_REF = app_ref
     log(f"ingetrazo-docker {os.environ.get('INGETRAZO_DOCKER_VERSION') or 'dev'}; {app_ref}")
     if MODE == "mcp":
         log(f"MCP engine on :{port}/rpc and /call; data {DATA_DIR}")
